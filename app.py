@@ -187,6 +187,85 @@ PARAM_CATEGORIES = {
 # Order for asking parameters (most intuitive order for layman)
 PARAM_ORDER = ["a", "b", "t", "Emod", "nu", "Kx", "Ky", "Kz", "x1", "x2", "y1", "y2", "q"]
 
+# Patterns to detect "use all defaults" intent
+USE_ALL_DEFAULTS_PATTERNS = [
+    # Exact matches
+    "use all defaults", "fill all defaults", "default all", "skip all",
+    "use defaults", "all defaults", "defaults for all", "default for all",
+    # "Rest" patterns
+    "default for the rest", "defaults for the rest", "use default for the rest",
+    "use defaults for the rest", "default for rest", "defaults for rest",
+    "take default for the rest", "take defaults for the rest",
+    "take default for rest", "take defaults for rest",
+    "fill in the rest", "fill the rest", "fill rest",
+    # "Remaining" patterns  
+    "default for remaining", "defaults for remaining", "use default for remaining",
+    "use defaults for remaining", "default remaining", "defaults remaining",
+    "take default for remaining", "take defaults for remaining",
+    "not sure about remaining", "not sure remaining",
+    # "Everything else" patterns
+    "default for everything else", "defaults for everything else",
+    "use default for everything", "use defaults for everything",
+    "default everything else", "defaults everything else",
+    "fill in everything else", "fill everything else",
+    # "Skip" patterns
+    "skip the rest", "skip rest", "skip remaining", "skip everything",
+    "skip all remaining", "skip the remaining",
+    # Short forms
+    "just use defaults", "just defaults", "go with defaults",
+    "proceed with defaults", "continue with defaults",
+    "put the defaults", "put defaults", "just put defaults",
+    # Confirmations that mean "use defaults for all"
+    "yes use defaults", "yes defaults", "yeah defaults",
+    "ok use defaults", "okay defaults", "sure defaults",
+    "sure use the defaults", "alright use defaults", "alright defaults",
+    # Fill patterns
+    "fill with defaults", "fill remaining with defaults", "fill rest with defaults",
+    "auto fill", "autofill", "auto-fill",
+    "complete with defaults", "complete it with defaults", "finish with defaults",
+    # Done patterns
+    "i'm done", "im done", "that's all", "thats all", "that's it", "thats it",
+    "nothing else", "no more values", "don't know the rest", "dont know the rest",
+    "i don't know", "i dont know", "no idea", "not sure about the rest",
+    # Uncertainty patterns
+    "no clue", "idk", "have no idea", "only know those",
+    "that's all i have", "thats all i have", "that's all the info", "all the info i have",
+    "only know these", "only have these", "don't have more", "dont have more",
+]
+
+
+def check_use_all_defaults_intent(user_input: str) -> bool:
+    """Check if user wants to use defaults for all remaining parameters."""
+    lower_input = user_input.lower().strip()
+    
+    # Check exact and substring matches
+    for pattern in USE_ALL_DEFAULTS_PATTERNS:
+        if pattern in lower_input:
+            return True
+    
+    # Check with regex for more flexible matching
+    flexible_patterns = [
+        r"\b(use|take|go with|apply|set|put)\s+(the\s+)?default(s)?(\s+values?)?\s+(for\s+)?(the\s+)?(rest|remaining|everything|all|others?)(\s+(of\s+)?(the\s+)?(parameters?|values?|settings?|fields?))?\b",
+        r"\bdefault(s)?(\s+values?)?\s+(for\s+)?(the\s+)?(rest|remaining|everything|all|others?)(\s+(of\s+)?(the\s+)?(parameters?|values?|settings?|fields?))?\b",
+        r"\bskip\s+(the\s+)?(rest|remaining|everything|all|others?)\b",
+        r"\b(fill|complete|finish)\s+(the\s+)?(rest\s+)?(it\s+)?(with\s+)?default(s)?\b",
+        r"\bi\s+(don'?t|do not)\s+(know|have)\s+(the\s+)?(rest|remaining|other)\b",
+        r"\bjust\s+(use\s+)?default(s)?\b",
+        r"\bfill\s+(in\s+)?(the\s+)?(rest|remaining|everything)\b",
+        r"\b(rest|remaining)\s+(with\s+)?default(s)?\b",
+        r"\b(yeah|ok|sure|alright)\s+(just\s+)?(fill|use|put)\s+(in\s+)?(the\s+)?(rest|defaults?|everything)\b",
+        r"\bi\s+(only\s+)?(know|have)\s+(those|these)\s*(values?)?\b",
+        r"\bidk\s+(the\s+)?(rest|remaining)?\b",
+        r"\bno\s+clue\s+(about\s+)?(the\s+)?(rest|remaining|others?|these)?\b",
+        r"\bnot\s+sure\s+(about\s+)?(the\s+)?(rest|remaining|others?)?\b",
+    ]
+    
+    for pattern in flexible_patterns:
+        if re.search(pattern, lower_input):
+            return True
+    
+    return False
+
 
 # =============================================================================
 # HELPER FUNCTIONS
@@ -443,17 +522,20 @@ def create_extraction_prompt(user_input: str, context: str, current_asking: Opti
     "understood_value": <number or null if not providing a value>,
     "original_unit": "<unit mentioned by user or null>",
     "parameter_key": "<which parameter this is for>",
-    "use_default": <true/false - if user wants default>,
+    "use_default": <true/false - if user wants default for CURRENT parameter>,
+    "use_all_defaults": <true/false - if user wants defaults for ALL remaining parameters>,
     "needs_clarification": <true/false>,
     "friendly_response": "<your warm, friendly response to the user>",
     "extracted_multiple": {{<any additional parameters if user mentioned multiple>}}
 }}
 
-REMEMBER:
-- "default", "skip", "ok", "fine", "sure" = use_default: true
-- Look for unit mentions: "meters", "m", "cm", "MPa", "kPa", etc.
-- If user says "4 meters", extract 4 with unit "m"
-- Be warm and encouraging in your response!
+IMPORTANT DETECTION RULES:
+- Single default: "default", "skip", "ok", "fine", "sure", "yes" = use_default: true (for current parameter only)
+- ALL defaults: "default for the rest", "use defaults for remaining", "skip all", "defaults for everything", "I don't know the rest", "that's all I have" = use_all_defaults: true
+- If user says they don't know remaining values or want to finish = use_all_defaults: true
+- Look for unit mentions: "meters", "m", "cm", "MPa", "kPa", "psi", "feet", "inches"
+- If user says "4 meters", extract 4 with unit "m" or "meters"
+- Be warm and encouraging!
 
 JSON RESPONSE:"""
     return prompt
@@ -466,6 +548,16 @@ def process_user_input_with_llm(
     current_asking: Optional[str] = None
 ) -> Dict[str, Any]:
     """Process user input through LLM for extraction and response generation."""
+    
+    # First, check if user wants all defaults using our pattern matching as a backup
+    if check_use_all_defaults_intent(user_input):
+        return {
+            "understood_value": None,
+            "use_default": False,
+            "use_all_defaults": True,
+            "needs_clarification": False,
+            "friendly_response": "Got it! I'll use the default values for all remaining parameters."
+        }
     
     try:
         system_message = SystemMessage(content=create_conversational_system_prompt())
@@ -490,12 +582,25 @@ def process_user_input_with_llm(
                 content = json_match.group()
             
             try:
-                return json.loads(content)
+                result = json.loads(content)
+                
+                # Ensure all expected keys exist with defaults
+                result.setdefault("understood_value", None)
+                result.setdefault("use_default", False)
+                result.setdefault("use_all_defaults", False)
+                result.setdefault("needs_clarification", False)
+                result.setdefault("friendly_response", "")
+                result.setdefault("original_unit", None)
+                result.setdefault("parameter_key", current_asking)
+                result.setdefault("extracted_multiple", {})
+                
+                return result
             except json.JSONDecodeError:
                 # If JSON parsing fails, return a helpful message
                 return {
                     "understood_value": None,
                     "use_default": False,
+                    "use_all_defaults": False,
                     "needs_clarification": True,
                     "friendly_response": "I'm not quite sure I understood that. Could you try again? You can enter a number, or say 'default' to use the suggested value. 😊"
                 }
@@ -789,13 +894,17 @@ def main():
                             st.session_state.user_provided_keys
                         )
                 
-                # User wants to use all defaults for remaining
-                elif lower_input in ["use all defaults", "fill all defaults", "default all", "skip all"]:
+                # User wants to use all defaults for remaining - check with comprehensive pattern matching
+                elif check_use_all_defaults_intent(user_input):
                     missing = [k for k in PARAM_ORDER if k not in st.session_state.params]
                     for key in missing:
                         st.session_state.params[key] = DEFAULT_VALUES[key]
                     st.session_state.mode = "complete"
-                    response = "Perfect! I've filled in all the remaining values with defaults. 👍\n\n"
+                    
+                    if missing:
+                        response = f"Perfect! I've filled in the remaining {len(missing)} values with defaults. 👍\n\n"
+                    else:
+                        response = "Great! All parameters were already set. 👍\n\n"
                     response += generate_completion_message(
                         st.session_state.params, 
                         st.session_state.user_provided_keys
@@ -854,7 +963,23 @@ def main():
                                 response = f"⚠️ Hmm, that value has an issue: {error_msg}\n\n"
                                 response += f"Could you try a different value? Or say 'default' to use **{format_value_with_unit(DEFAULT_VALUES[param_key], param_key)}**."
                     
-                    # Handle use_default
+                    # Handle use_all_defaults (LLM detected user wants all remaining defaults)
+                    elif result.get("use_all_defaults"):
+                        missing = [k for k in PARAM_ORDER if k not in st.session_state.params]
+                        for key in missing:
+                            st.session_state.params[key] = DEFAULT_VALUES[key]
+                        st.session_state.mode = "complete"
+                        
+                        if missing:
+                            response = f"Perfect! I've filled in the remaining {len(missing)} values with defaults. 👍\n\n"
+                        else:
+                            response = "Great! All parameters were already set. 👍\n\n"
+                        response += generate_completion_message(
+                            st.session_state.params, 
+                            st.session_state.user_provided_keys
+                        )
+                    
+                    # Handle use_default for single/current parameter
                     elif result.get("use_default") and st.session_state.current_asking:
                         param_key = st.session_state.current_asking
                         default_val = DEFAULT_VALUES[param_key]

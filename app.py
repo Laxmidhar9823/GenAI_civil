@@ -1,6 +1,7 @@
 import streamlit as st
 import json
 import re
+import pandas as pd
 from typing import Dict, Any, Tuple
 
 from langchain_ollama import ChatOllama
@@ -46,6 +47,229 @@ Constraints:
 """
 
 AVAILABLE_MODELS = ["llama3.1:8b", "deepseek-r1:8b"]
+
+PARAM_DESCRIPTIONS = {
+    "Emod": {"name": "Modulus of Elasticity", "unit": "MPa", "category": "Material Properties"},
+    "nu":   {"name": "Poisson's Ratio", "unit": "—", "category": "Material Properties"},
+    "a":    {"name": "Slab Length (X-direction)", "unit": "mm", "category": "Slab Geometry"},
+    "b":    {"name": "Slab Width (Y-direction)", "unit": "mm", "category": "Slab Geometry"},
+    "t":    {"name": "Slab Thickness", "unit": "mm", "category": "Slab Geometry"},
+    "Kx":   {"name": "Foundation Stiffness (X)", "unit": "—", "category": "Foundation Properties"},
+    "Ky":   {"name": "Foundation Stiffness (Y)", "unit": "—", "category": "Foundation Properties"},
+    "Kz":   {"name": "Foundation Stiffness (Z)", "unit": "—", "category": "Foundation Properties"},
+    "x1":   {"name": "Load Start Position (X)", "unit": "mm", "category": "Load Configuration"},
+    "x2":   {"name": "Load End Position (X)", "unit": "mm", "category": "Load Configuration"},
+    "y1":   {"name": "Load Start Position (Y)", "unit": "mm", "category": "Load Configuration"},
+    "y2":   {"name": "Load End Position (Y)", "unit": "mm", "category": "Load Configuration"},
+    "q":    {"name": "Tyre Contact Pressure", "unit": "MPa", "category": "Load Configuration"},
+}
+
+
+def display_params_table(params: Dict[str, Any], title: str = "Configuration Parameters", highlight_keys: list = None):
+    """Display parameters as a professional, readable Streamlit table grouped by category."""
+    if highlight_keys is None:
+        highlight_keys = []
+
+    # Group parameters by category
+    categories = {}
+    for key in params:
+        if key not in PARAM_DESCRIPTIONS:
+            continue
+        cat = PARAM_DESCRIPTIONS[key]["category"]
+        if cat not in categories:
+            categories[cat] = []
+        categories[cat].append(key)
+
+    st.markdown(f"#### 📄 {title}")
+    st.markdown("---")
+
+    for cat, keys in categories.items():
+        st.markdown(f"**{cat}**")
+        rows = []
+        for key in keys:
+            desc = PARAM_DESCRIPTIONS[key]
+            value = params[key]
+            # Format numeric values nicely
+            if isinstance(value, float):
+                if value == int(value):
+                    display_val = f"{int(value):,}"
+                else:
+                    display_val = f"{value:,.4f}".rstrip('0').rstrip('.')
+            elif isinstance(value, int):
+                display_val = f"{value:,}"
+            else:
+                display_val = str(value)
+
+            source = "✏️ User" if key in highlight_keys else "⚙️ Default"
+            rows.append({
+                "Parameter": f"`{key}`",
+                "Description": desc["name"],
+                "Value": display_val,
+                "Unit": desc["unit"],
+                "Source": source,
+            })
+
+        df = pd.DataFrame(rows)
+        st.table(df)
+
+
+def format_readable_output(params: Dict[str, Any], user_keys: list = None) -> str:
+    """Create a professional plain-text report of the parameters."""
+    if user_keys is None:
+        user_keys = []
+
+    lines = []
+    lines.append("=" * 70)
+    lines.append("       RIGID PAVEMENT ANALYSIS — PARAMETER CONFIGURATION")
+    lines.append("=" * 70)
+    lines.append("")
+
+    # Group by category
+    categories = {}
+    for key in params:
+        if key not in PARAM_DESCRIPTIONS:
+            continue
+        cat = PARAM_DESCRIPTIONS[key]["category"]
+        if cat not in categories:
+            categories[cat] = []
+        categories[cat].append(key)
+
+    for cat, keys in categories.items():
+        lines.append(f"  ┌─ {cat}")
+        lines.append(f"  │")
+        for key in keys:
+            desc = PARAM_DESCRIPTIONS[key]
+            value = params[key]
+            if isinstance(value, float) and value == int(value):
+                display_val = f"{int(value):,}"
+            elif isinstance(value, float):
+                display_val = f"{value:,.4f}".rstrip('0').rstrip('.')
+            elif isinstance(value, int):
+                display_val = f"{value:,}"
+            else:
+                display_val = str(value)
+
+            source = "[User]" if key in user_keys else "[Default]"
+            unit_str = f" {desc['unit']}" if desc['unit'] != '—' else ""
+            lines.append(f"  │   {key:>4s}  ({desc['name']}) : {display_val}{unit_str}  {source}")
+        lines.append(f"  │")
+
+    lines.append("=" * 70)
+    lines.append("  Note: [User] = provided by user  |  [Default] = system default")
+    lines.append("=" * 70)
+    return "\n".join(lines)
+
+
+def display_final_output(params: Dict[str, Any], user_keys: list = None):
+    """Display the final output with professional table + download buttons."""
+    if user_keys is None:
+        user_keys = list(params.keys())
+
+    display_params_table(params, title="Final Pavement Configuration", highlight_keys=user_keys)
+
+    readable_report = format_readable_output(params, user_keys)
+    json_str = json.dumps(params, indent=2)
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.download_button(
+            label="📥 Download Report (TXT)",
+            data=readable_report,
+            file_name="pavement_config_report.txt",
+            mime="text/plain",
+            use_container_width=True,
+        )
+    with col_b:
+        st.download_button(
+            label="📥 Download Data (JSON)",
+            data=json_str,
+            file_name="pavement_config.json",
+            mime="application/json",
+            use_container_width=True,
+        )
+
+
+def get_message_for_final_output(params: Dict[str, Any], user_keys: list = None) -> str:
+    """Return a markdown-friendly summary for chat history."""
+    if user_keys is None:
+        user_keys = list(params.keys())
+
+    lines = ["✅ **Final Pavement Configuration**\n"]
+    lines.append("| Parameter | Description | Value | Unit | Source |")
+    lines.append("|-----------|-------------|-------|------|--------|")
+    for key in params:
+        if key not in PARAM_DESCRIPTIONS:
+            continue
+        desc = PARAM_DESCRIPTIONS[key]
+        value = params[key]
+        if isinstance(value, float) and value == int(value):
+            display_val = f"{int(value):,}"
+        elif isinstance(value, float):
+            display_val = f"{value:,.4f}".rstrip('0').rstrip('.')
+        elif isinstance(value, int):
+            display_val = f"{value:,}"
+        else:
+            display_val = str(value)
+        source = "User" if key in user_keys else "Default"
+        lines.append(f"| `{key}` | {desc['name']} | {display_val} | {desc['unit']} | {source} |")
+
+    return "\n".join(lines)
+
+
+def display_extracted_params(params: Dict[str, Any]):
+    """Display extracted parameters in a readable table (before final output)."""
+    rows = []
+    for key in params:
+        if key not in PARAM_DESCRIPTIONS:
+            continue
+        desc = PARAM_DESCRIPTIONS[key]
+        value = params[key]
+        if isinstance(value, float) and value == int(value):
+            display_val = f"{int(value):,}"
+        elif isinstance(value, float):
+            display_val = f"{value:,.4f}".rstrip('0').rstrip('.')
+        elif isinstance(value, int):
+            display_val = f"{value:,}"
+        else:
+            display_val = str(value)
+        rows.append({
+            "Parameter": f"`{key}`",
+            "Description": desc["name"],
+            "Value": display_val,
+            "Unit": desc["unit"],
+        })
+    if rows:
+        st.markdown("**Extracted Parameters:**")
+        df = pd.DataFrame(rows)
+        st.table(df)
+
+
+def display_missing_params(missing_keys: list):
+    """Display missing parameters with their default values in a readable table."""
+    rows = []
+    for key in missing_keys:
+        if key not in PARAM_DESCRIPTIONS:
+            continue
+        desc = PARAM_DESCRIPTIONS[key]
+        value = DEFAULT_VALUES[key]
+        if isinstance(value, float) and value == int(value):
+            display_val = f"{int(value):,}"
+        elif isinstance(value, float):
+            display_val = f"{value:,.4f}".rstrip('0').rstrip('.')
+        elif isinstance(value, int):
+            display_val = f"{value:,}"
+        else:
+            display_val = str(value)
+        rows.append({
+            "Parameter": f"`{key}`",
+            "Description": desc["name"],
+            "Default Value": display_val,
+            "Unit": desc["unit"],
+        })
+    if rows:
+        st.markdown("**Missing Parameters (will use defaults):**")
+        df = pd.DataFrame(rows)
+        st.table(df)
 
 
 def get_ollama_llm(base_url: str = "http://localhost:11434", model: str = "gemma3:12b"):
@@ -348,22 +572,14 @@ def main():
                         final_params = merge_with_defaults(st.session_state.extracted_params)
                         st.session_state.final_output = final_params
                         st.session_state.awaiting_confirmation = False
+                        user_keys = list(st.session_state.extracted_params.keys())
                         
-                        output_msg = "✅ Great! Using default values for missing fields.\n\n**Generated JSON Configuration:**"
-                        st.markdown(output_msg)
-                        st.json(final_params)
-                        
-                        json_str = format_json_output(final_params)
-                        st.download_button(
-                            label="📥 Download JSON",
-                            data=json_str,
-                            file_name="pavement_config.json",
-                            mime="application/json"
-                        )
+                        st.markdown("✅ Great! Using default values for missing fields.")
+                        display_final_output(final_params, user_keys=user_keys)
                         
                         st.session_state.messages.append({
                             "role": "assistant", 
-                            "content": output_msg + f"\n```json\n{json_str}\n```"
+                            "content": get_message_for_final_output(final_params, user_keys=user_keys)
                         })
                     else:
                         if response:
@@ -372,11 +588,10 @@ def main():
                         still_missing = get_missing_fields(st.session_state.extracted_params)
                         
                         if still_missing:
-                            missing_with_defaults = {k: DEFAULT_VALUES[k] for k in still_missing}
-                            msg = f"I've noted your input. The following fields are still missing:\n\n"
-                            msg += f"**Missing fields and their defaults:**\n```json\n{json.dumps(missing_with_defaults, indent=2)}\n```\n\n"
-                            msg += "Would you like to use these default values, or would you prefer to specify them?"
-                            st.markdown(msg)
+                            st.markdown("I've noted your input. The following fields are still missing:")
+                            display_missing_params(still_missing)
+                            st.markdown("Would you like to use these default values, or would you prefer to specify them?")
+                            msg = "I've noted your input. Some fields are still missing. Would you like to use default values?"
                             st.session_state.messages.append({"role": "assistant", "content": msg})
                             st.session_state.missing_fields = still_missing
                         else:
@@ -386,22 +601,14 @@ def main():
                             if is_valid:
                                 st.session_state.final_output = final_params
                                 st.session_state.awaiting_confirmation = False
+                                user_keys = list(st.session_state.extracted_params.keys())
                                 
-                                output_msg = "✅ All parameters provided and validated!\n\n**Generated JSON Configuration:**"
-                                st.markdown(output_msg)
-                                st.json(final_params)
-                                
-                                json_str = format_json_output(final_params)
-                                st.download_button(
-                                    label="📥 Download JSON",
-                                    data=json_str,
-                                    file_name="pavement_config.json",
-                                    mime="application/json"
-                                )
+                                st.markdown("✅ All parameters provided and validated!")
+                                display_final_output(final_params, user_keys=user_keys)
                                 
                                 st.session_state.messages.append({
                                     "role": "assistant", 
-                                    "content": output_msg + f"\n```json\n{json_str}\n```"
+                                    "content": get_message_for_final_output(final_params, user_keys=user_keys)
                                 })
                             else:
                                 error_msg = "⚠️ **Validation Errors:**\n" + "\n".join([f"- {e}" for e in errors])
@@ -432,31 +639,23 @@ def main():
                                 st.session_state.awaiting_confirmation = True
                                 st.session_state.missing_fields = missing
                                 
-                                msg = f"✅ I've extracted the following parameters:\n```json\n{json.dumps(extracted, indent=2)}\n```\n\n"
-                                missing_with_defaults = {k: DEFAULT_VALUES[k] for k in missing}
-                                msg += f"**The following fields are missing and will use default values:**\n```json\n{json.dumps(missing_with_defaults, indent=2)}\n```\n\n"
-                                msg += "Would you like to use these default values for the missing fields? (Yes/No, or provide the missing values)"
-                                st.markdown(msg)
+                                st.markdown("✅ I've extracted the following parameters:")
+                                display_extracted_params(extracted)
+                                display_missing_params(missing)
+                                st.markdown("Would you like to use these default values for the missing fields? *(Yes/No, or provide the missing values)*")
+                                msg = "Extracted some parameters. Missing fields shown with defaults. Awaiting confirmation."
                                 st.session_state.messages.append({"role": "assistant", "content": msg})
                             else:
                                 final_params = extracted
                                 st.session_state.final_output = final_params
+                                user_keys = list(extracted.keys())
                                 
-                                output_msg = "✅ All parameters extracted and validated!\n\n**Generated JSON Configuration:**"
-                                st.markdown(output_msg)
-                                st.json(final_params)
-                                
-                                json_str = format_json_output(final_params)
-                                st.download_button(
-                                    label="📥 Download JSON",
-                                    data=json_str,
-                                    file_name="pavement_config.json",
-                                    mime="application/json"
-                                )
+                                st.markdown("✅ All parameters extracted and validated!")
+                                display_final_output(final_params, user_keys=user_keys)
                                 
                                 st.session_state.messages.append({
                                     "role": "assistant", 
-                                    "content": output_msg + f"\n```json\n{json_str}\n```"
+                                    "content": get_message_for_final_output(final_params, user_keys=user_keys)
                                 })
     
     elif user_input and not ollama_ready:

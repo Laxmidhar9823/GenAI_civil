@@ -71,12 +71,44 @@ By default it calls the backend at `http://localhost:8000`. To override:
 VITE_API_BASE_URL=http://localhost:8000 npm run dev
 ```
 
+## Run with Docker Compose (optional)
+
+From the repo root:
+
+```bash
+docker compose up --build
+```
+
+This starts:
+- `api` on `http://localhost:8000`
+- `web` on `http://localhost:5173`
+
+The web image reads `VITE_API_BASE_URL` at build time. Default is `http://localhost:8000`.
+To override:
+
+```bash
+VITE_API_BASE_URL=http://localhost:8000 docker compose up --build
+```
+
+Stop services:
+
+```bash
+docker compose down
+```
+
+> Ollama remains an external dependency (run `ollama serve` on your host and pull the model).
+
 Backend endpoints:
 - `GET /health`
-- `GET /ollama/status?ollama_url=...&model=...`
+- `GET /ollama/status?ollama_url=...&model=...&timeout_seconds=...`
 - `GET /config/schema`
 - `POST /reset`
 - `POST /chat`
+
+Backend environment variables:
+- `BACKEND_CORS_ORIGINS` (comma-separated) to override allowed CORS origins.
+  - Defaults remain local dev origins (`localhost:3000`, `5173`, `8080`, `8501`) when not set.
+- `BACKEND_ENV` (`development`/`dev`/`local`) to include extra exception details in error responses.
 
 > Ollama must be running and the target model must be pulled (same as Streamlit mode).
 

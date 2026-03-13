@@ -4,7 +4,7 @@ import ChatPanel from '../components/ChatPanel'
 import OllamaSettings from '../components/OllamaSettings'
 import ParamsPanel from '../components/ParamsPanel'
 import { API_BASE_URL, apiChat, apiGetSchema, apiOllamaStatus, apiReset } from '../lib/api'
-import type { ChatMessage, OllamaCheckState } from '../lib/types'
+import type { ChatMessage, ConversationState, OllamaCheckState, SchemaResponse } from '../lib/types'
 import { computeProgress, extractCollectedParams, extractFinalParams, extractMessagesFromState, extractParamInfo } from '../lib/parsers'
 import MotionSection from '../components/MotionSection'
 
@@ -17,10 +17,10 @@ export default function AssistantPage() {
   const quickPrompt = searchParams.get('prompt')?.trim() || ''
   const quickStartSent = useRef(false)
   const [error, setError] = useState<string | null>(null)
-  const [schema, setSchema] = useState<unknown>(null)
-  const [state, setState] = useState<unknown>(null)
+  const [schema, setSchema] = useState<SchemaResponse | null>(null)
+  const [state, setState] = useState<ConversationState | null>(null)
   const [messages, setMessages] = useState<ChatMessage[]>([])
-  const [finalParamsFromResponse, setFinalParamsFromResponse] = useState<Record<string, unknown> | null>(null)
+  const [finalParamsFromResponse, setFinalParamsFromResponse] = useState<Record<string, number> | null>(null)
   const [busy, setBusy] = useState(false)
   const [schemaBusy, setSchemaBusy] = useState(false)
   const [ollamaUrl, setOllamaUrl] = useState(() => localStorage.getItem('ollamaUrl') || 'http://localhost:11434')
@@ -36,7 +36,7 @@ export default function AssistantPage() {
   const schemaDot = schemaBusy ? 'check' : schema ? 'ok' : 'err'
   const schemaLabel = schemaBusy ? 'Loading schema…' : schema ? 'Schema loaded' : 'Schema unavailable'
 
-  const applyStateToMessages = useCallback((nextState: unknown) => {
+  const applyStateToMessages = useCallback((nextState: ConversationState) => {
     const fromState = extractMessagesFromState(nextState)
     if (fromState.length) {
       setMessages(fromState)
@@ -132,7 +132,7 @@ export default function AssistantPage() {
         })
 
         setState(resp.state)
-        setFinalParamsFromResponse((resp.final_params as Record<string, unknown> | undefined) ?? null)
+        setFinalParamsFromResponse(resp.final_params ?? null)
 
         const used = applyStateToMessages(resp.state)
         if (!used) {

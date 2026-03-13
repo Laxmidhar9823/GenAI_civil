@@ -3,12 +3,49 @@ type FetchJsonOptions = {
   body?: unknown
   signal?: AbortSignal
 }
-import type { OllamaStatusResponse } from './types'
+import type {
+  ChatResponse,
+  ConversationState,
+  ErrorResponse,
+  OllamaStatusResponse,
+  ResetResponse,
+  SchemaResponse,
+} from './types'
 
 export const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000').replace(
   /\/$/,
   '',
 )
+
+function stringifyUnknown(v: unknown): string {
+  if (typeof v === 'string') return v
+  if (v === undefined || v === null) return ''
+  try {
+    return JSON.stringify(v)
+  } catch {
+    return String(v)
+  }
+}
+
+function parseErrorMessage(json: unknown): string {
+  if (!json || typeof json !== 'object') return ''
+
+  const payload = json as Partial<ErrorResponse> & { detail?: unknown; message?: unknown }
+
+  if (payload.error && typeof payload.error === 'object') {
+    const msg = typeof payload.error.message === 'string' ? payload.error.message : ''
+    const details = stringifyUnknown(payload.error.details)
+    if (msg && details) return `${msg} (${details})`
+    if (msg) return msg
+    if (details) return details
+  }
+
+  if (typeof payload.detail === 'string') return payload.detail
+  if (typeof payload.message === 'string') return payload.message
+  if (payload.detail !== undefined) return stringifyUnknown(payload.detail)
+
+  return stringifyUnknown(json)
+}
 
 async function fetchJson<T>(path: string, options: FetchJsonOptions = {}): Promise<T> {
   const url = `${API_BASE_URL}${path}`
@@ -29,7 +66,7 @@ async function fetchJson<T>(path: string, options: FetchJsonOptions = {}): Promi
     try {
       if (contentType.includes('application/json')) {
         const json = await res.json()
-        detail = json?.detail ? String(json.detail) : JSON.stringify(json)
+        detail = parseErrorMessage(json)
       } else {
         detail = await res.text()
       }
@@ -55,30 +92,19 @@ export type LLMConfig = {
   model: string
 }
 
-export type ResetResponse = {
-  assistant_message: string
-  state: unknown
-}
-
-export type ChatResponse = {
-  assistant_message?: string
-  state: unknown
-  final_params?: Record<string, unknown>
-}
-
 export async function apiReset(): Promise<ResetResponse> {
   return fetchJson('/reset', { method: 'POST', body: {} })
 }
 
 export async function apiChat(payload: {
   user_input: string
-  state: unknown
+  state: ConversationState
   llm_config: LLMConfig
 }): Promise<ChatResponse> {
   return fetchJson('/chat', { method: 'POST', body: payload })
 }
 
-export async function apiGetSchema(): Promise<unknown> {
+export async function apiGetSchema(): Promise<SchemaResponse> {
   return fetchJson('/config/schema')
 }
 

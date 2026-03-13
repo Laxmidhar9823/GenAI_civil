@@ -1,6 +1,8 @@
-from typing import Dict, Optional
+import os
+import uuid
+from typing import Dict
 
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -33,33 +35,82 @@ from backend.schemas import (
     ResetResponse,
 )
 
-app = FastAPI(title="Pavement Assistant Backend", version="1.0.0")
+APP_NAME = "Pavement Assistant Backend"
+APP_VERSION = "1.0.0"
+DEFAULT_CORS_ORIGINS = [
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "http://localhost:8080",
+    "http://localhost:8501",
+]
+APP_ENV = os.getenv("BACKEND_ENV", os.getenv("ENV", "production")).lower()
+IS_DEV = APP_ENV in {"dev", "development", "local"}
+
+
+def _allowed_origins() -> list[str]:
+    env_value = os.getenv("BACKEND_CORS_ORIGINS", "").strip()
+    if not env_value:
+        return DEFAULT_CORS_ORIGINS
+    origins = [origin.strip() for origin in env_value.split(",") if origin.strip()]
+    return origins or DEFAULT_CORS_ORIGINS
+
+
+def _request_id(request: Request) -> str:
+    return getattr(request.state, "request_id", "unknown")
+
+
+app = FastAPI(title=APP_NAME, version=APP_VERSION)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://localhost:5173",
-        "http://localhost:8080",
-        "http://localhost:8501",
-    ],
+    allow_origins=_allowed_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
+@app.middleware("http")
+async def add_request_id_header(request: Request, call_next):
+    request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
+    request.state.request_id = request_id
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = request_id
+    return response
+
+
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    details = {"request_id": _request_id(request), "path": str(request.url.path), "errors": exc.errors()}
     err = ErrorResponse(
-        error=ErrorDetail(code="validation_error", message="Invalid request payload", details={"errors": exc.errors()})
+        error=ErrorDetail(
+            code="validation_error",
+            message="Invalid request payload. Please check the request body and try again.",
+            details=details,
+        )
     )
     return JSONResponse(status_code=422, content=err.model_dump())
 
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    err = ErrorResponse(error=ErrorDetail(code="internal_error", message="An unexpected error occurred"))
+    details = {"request_id": _request_id(request)}
+    if IS_DEV:
+        details.update(
+            {
+                "exception_type": type(exc).__name__,
+                "exception_message": str(exc),
+                "path": str(request.url.path),
+                "method": request.method,
+            }
+        )
+    err = ErrorResponse(
+        error=ErrorDetail(
+            code="internal_error",
+            message="An unexpected error occurred. Share request_id if you need support.",
+            details=details,
+        )
+    )
     return JSONResponse(status_code=500, content=err.model_dump())
 
 
@@ -69,17 +120,31 @@ def _trim_messages(state: ConversationState, max_messages: int = 50) -> None:
 
 
 @app.get("/health")
-def health() -> Dict[str, str]:
-    return {"status": "ok"}
+def health() -> Dict[str, object]:
+    return {
+        "status": "ok",
+        "service": "pavement-assistant-backend",
+        "version": app.version,
+        "environment": APP_ENV,
+        "stateless": True,
+    }
 
 
 @app.get("/ollama/status", response_model=OllamaStatusResponse)
 def ollama_status(
-    ollama_url: str = Query("http://localhost:11434"), model: str = Query("gemma3:12b")
+    ollama_url: str = Query("http://localhost:11434"),
+    model: str = Query("gemma3:12b"),
+    timeout_seconds: float = Query(5.0, ge=1.0, le=30.0),
 ):
-    connected, model_available, available_models = check_ollama_connection(ollama_url, model)
+    connected, model_available, available_models, error = check_ollama_connection(
+        ollama_url, model, timeout_seconds
+    )
     return OllamaStatusResponse(
-        connected=connected, model_available=model_available, available_models=available_models
+        connected=connected,
+        model_available=model_available,
+        available_models=available_models,
+        timeout_seconds=timeout_seconds,
+        error=error,
     )
 
 

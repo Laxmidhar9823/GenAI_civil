@@ -1,4 +1,7 @@
-import type { ChatMessage } from './types'
+import type { ChatMessage, ConversationState, ParamInfoMap, SchemaResponse } from './types'
+
+type ObjectLike = Record<string, unknown>
+type StateLike = ConversationState | ObjectLike | null | undefined
 
 function safeString(v: unknown): string {
   if (typeof v === 'string') return v
@@ -10,36 +13,28 @@ function safeString(v: unknown): string {
   }
 }
 
-export function extractMessagesFromState(state: unknown): ChatMessage[] {
+export function extractMessagesFromState(state: StateLike): ChatMessage[] {
   if (!state || typeof state !== 'object') return []
 
-  // Common shapes:
-  // - { messages: [{role:'assistant'|'user', content:'...'}] }
-  // - { messages: [{type:'assistant', message:'...'}] }
-  // - { history: [...] }
-  const s = state as any
-  const arr = Array.isArray(s.messages)
-    ? s.messages
-    : Array.isArray(s.history)
-      ? s.history
-      : Array.isArray(s.chat)
-        ? s.chat
-        : null
+  const s = state as ObjectLike
+  const arrRaw = s.messages ?? s.history ?? s.chat
+  const arr = Array.isArray(arrRaw) ? arrRaw : null
 
   if (!arr) return []
 
   const out: ChatMessage[] = []
   for (let i = 0; i < arr.length; i++) {
-    const m = arr[i] as any
-    const roleRaw = (m?.role ?? m?.sender ?? m?.type ?? m?.author) as unknown
-    const contentRaw = (m?.content ?? m?.message ?? m?.text ?? m?.value) as unknown
+    if (!arr[i] || typeof arr[i] !== 'object') continue
+    const m = arr[i] as ObjectLike
+    const roleRaw = m.role ?? m.sender ?? m.type ?? m.author
+    const contentRaw = m.content ?? m.message ?? m.text ?? m.value
 
     const role = roleRaw === 'user' ? 'user' : 'assistant'
     const content = safeString(contentRaw)
     if (!content) continue
 
     out.push({
-      id: String(m?.id ?? `${i}`),
+      id: String(m.id ?? `${i}`),
       role,
       content,
     })
@@ -49,13 +44,13 @@ export function extractMessagesFromState(state: unknown): ChatMessage[] {
 }
 
 export function extractFinalParams(
-  state: unknown,
+  state: StateLike,
   finalParamsFromResponse?: Record<string, unknown> | null,
 ): Record<string, unknown> | null {
   if (finalParamsFromResponse && typeof finalParamsFromResponse === 'object') return finalParamsFromResponse
   if (!state || typeof state !== 'object') return null
 
-  const s = state as any
+  const s = state as ObjectLike
   const candidates = [s.final_params, s.finalParams, s.params, s.parameters, s.configuration, s.collected_params]
 
   for (const c of candidates) {
@@ -67,9 +62,9 @@ export function extractFinalParams(
   return null
 }
 
-export function extractCollectedParams(state: unknown): Record<string, unknown> | null {
+export function extractCollectedParams(state: StateLike): Record<string, unknown> | null {
   if (!state || typeof state !== 'object') return null
-  const s = state as any
+  const s = state as ObjectLike
 
   const candidates = [s.collected_params, s.collectedParams, s.params, s.parameters, s.configuration]
   for (const c of candidates) {
@@ -80,28 +75,28 @@ export function extractCollectedParams(state: unknown): Record<string, unknown> 
   return null
 }
 
-export function extractParamInfo(schema: unknown): Record<string, any> | null {
+export function extractParamInfo(schema: SchemaResponse | ObjectLike | null | undefined): ParamInfoMap | null {
   if (!schema || typeof schema !== 'object') return null
-  const s = schema as any
+  const s = schema as SchemaResponse & ObjectLike
 
   // Expected (from existing app): { DEFAULT_VALUES: {...}, PARAM_INFO: {...} }
-  if (s.PARAM_INFO && typeof s.PARAM_INFO === 'object') return s.PARAM_INFO
+  if (s.PARAM_INFO && typeof s.PARAM_INFO === 'object' && !Array.isArray(s.PARAM_INFO)) return s.PARAM_INFO
 
   // API shape (snake_case)
-  if (s.param_info && typeof s.param_info === 'object') return s.param_info
+  if (s.param_info && typeof s.param_info === 'object' && !Array.isArray(s.param_info)) return s.param_info
 
   // Alternative shapes:
-  if (s.parameters && typeof s.parameters === 'object') return s.parameters
-  if (s.schema && typeof s.schema === 'object') return s.schema
+  if (s.parameters && typeof s.parameters === 'object' && !Array.isArray(s.parameters)) return s.parameters as ParamInfoMap
+  if (s.schema && typeof s.schema === 'object' && !Array.isArray(s.schema)) return s.schema as ParamInfoMap
 
   // If the schema itself is a mapping.
-  if (!Array.isArray(s) && Object.keys(s).length) return s
+  if (!Array.isArray(s) && Object.keys(s).length) return s as ParamInfoMap
 
   return null
 }
 
 export function computeProgress(args: {
-  paramInfo: Record<string, any> | null
+  paramInfo: ParamInfoMap | null
   collected: Record<string, unknown> | null
 }): { done: number; total: number } {
   const { paramInfo, collected } = args

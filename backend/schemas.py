@@ -51,6 +51,8 @@ class OllamaStatusResponse(BaseModel):
     connected: bool
     model_available: bool
     available_models: List[str]
+    timeout_seconds: float
+    error: Optional[str] = None
 
 
 class ErrorDetail(BaseModel):

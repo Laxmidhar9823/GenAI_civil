@@ -45,6 +45,55 @@ streamlit run app.py
 
 The app will open in your browser at `http://localhost:8501`
 
+## Running the FastAPI Backend
+
+The repository now also includes a stateless backend in `backend/`.
+
+```bash
+uvicorn backend.main:app --reload
+```
+
+API will be available at `http://localhost:8000` with docs at `http://localhost:8000/docs`.
+
+## Running the Web Frontend
+
+The `frontend/` directory contains a React app.
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+By default it calls the backend at `http://localhost:8000`. To override:
+
+```bash
+VITE_API_BASE_URL=http://localhost:8000 npm run dev
+```
+
+Backend endpoints:
+- `GET /health`
+- `GET /ollama/status?ollama_url=...&model=...`
+- `GET /config/schema`
+- `POST /reset`
+- `POST /chat`
+
+> Ollama must be running and the target model must be pulled (same as Streamlit mode).
+
+## API Integration (stateless contract)
+
+This repository currently ships a **Streamlit UI** (`app.py`). If you are building a separate frontend (React/Next/etc.), the backend exposes **stateless** endpoints that accept/return a `ConversationState` object each turn (no server-side sessions).
+
+Endpoints:
+- `POST /reset` → returns `{ assistant_message, state }` where `state` is a fresh `ConversationState`
+- `POST /chat` → request `{ user_input, state, llm_config }` and response `{ assistant_message, state, final_params? }`
+  - `llm_config` is `{ ollama_url, model }`
+  - `final_params` is included when the conversation is complete
+
+`GET /config/schema` returns parameter definitions and defaults (both legacy UPPERCASE keys like `PARAM_INFO` and snake_case keys like `param_info`) so different frontends can integrate easily.
+
+For parity with the existing UI, mirror the Streamlit flow in `app.py` (modes, `current_asking`, defaults-for-rest detection, and per-parameter validation).
+
 ## Usage
 
 1. Ensure Ollama is running with gemma3:12b model (sidebar will show status)

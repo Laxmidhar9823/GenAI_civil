@@ -1,4 +1,4 @@
-from typing import Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -10,7 +10,7 @@ class Message(BaseModel):
 
 class ConversationState(BaseModel):
     messages: List[Message] = Field(default_factory=list)
-    params: Dict[str, float] = Field(default_factory=dict)
+    params: Dict[str, Any] = Field(default_factory=dict)
     user_provided_keys: List[str] = Field(default_factory=list)
     current_asking: Optional[str] = None
     mode: Literal["welcome", "guided", "free", "complete"] = "welcome"
@@ -39,7 +39,7 @@ class ChatRequest(BaseModel):
 class ChatResponse(BaseModel):
     assistant_message: str
     state: ConversationState
-    final_params: Optional[Dict[str, float]] = None
+    final_params: Optional[Dict[str, Any]] = None
 
 
 class ResetResponse(BaseModel):

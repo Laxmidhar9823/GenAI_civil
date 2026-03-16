@@ -9,9 +9,12 @@ from fastapi.responses import JSONResponse
 
 from backend.agent_logic import (
     DEFAULT_VALUES,
+    NODE_DEFAULT_VALUES,
+    NODE_PARAM_INFO,
     PARAM_CATEGORIES,
     PARAM_INFO,
     PARAM_ORDER,
+    build_final_configuration,
     check_use_all_defaults_intent,
     process_user_input_with_llm,
     convert_to_standard_unit,
@@ -22,6 +25,7 @@ from backend.agent_logic import (
     validate_single_param,
     build_conversation_context,
     find_first_inconsistent_param,
+    get_default_value,
     with_progress_tail,
 )
 from backend.ollama import (
@@ -186,16 +190,24 @@ def ollama_status(
 
 @app.get("/config/schema")
 def config_schema() -> Dict[str, object]:
+    final_output_defaults = build_final_configuration({})
+
     # Return both legacy (UPPERCASE) and API (snake_case) keys for frontend compatibility.
     return {
         "PARAM_INFO": PARAM_INFO,
         "DEFAULT_VALUES": DEFAULT_VALUES,
+        "NODE_DEFAULT_VALUES": NODE_DEFAULT_VALUES,
+        "NODE_PARAM_INFO": NODE_PARAM_INFO,
         "PARAM_ORDER": PARAM_ORDER,
         "PARAM_CATEGORIES": PARAM_CATEGORIES,
+        "FINAL_OUTPUT_DEFAULTS": final_output_defaults,
         "param_info": PARAM_INFO,
         "default_values": DEFAULT_VALUES,
+        "node_default_values": NODE_DEFAULT_VALUES,
+        "node_param_info": NODE_PARAM_INFO,
         "param_order": PARAM_ORDER,
         "param_categories": PARAM_CATEGORIES,
+        "final_output_defaults": final_output_defaults,
     }
 
 
@@ -244,7 +256,7 @@ def chat(req: ChatRequest) -> ChatResponse:
         if use_all_defaults:
             missing = [k for k in PARAM_ORDER if k not in state.params]
             for key in missing:
-                state.params[key] = DEFAULT_VALUES[key]
+                state.params[key] = get_default_value(key)
 
             state.mode = "complete"
             if missing:
@@ -255,25 +267,35 @@ def chat(req: ChatRequest) -> ChatResponse:
         else:
             extracted_multiple = result.get("extracted_multiple") or {}
             extracted_units = result.get("extracted_units") or {}
-            updates: Dict[str, float] = {}
+            updates: Dict[str, object] = {}
             explicit_keys = set()
             default_applied_keys = set()
 
             if isinstance(extracted_multiple, dict):
                 for key, val in extracted_multiple.items():
-                    if key in DEFAULT_VALUES and isinstance(val, (int, float)):
+                    if key in PARAM_ORDER and isinstance(val, (int, float)):
                         updates[key] = float(val)
+                        explicit_keys.add(key)
+                    elif key in {"x", "y"} and isinstance(val, list) and all(
+                        isinstance(item, (int, float)) for item in val
+                    ):
+                        updates[key] = [float(item) for item in val]
                         explicit_keys.add(key)
 
             single_value = result.get("understood_value")
             single_key = result.get("parameter_key") or state.current_asking
-            if isinstance(single_value, (int, float)) and single_key in DEFAULT_VALUES:
+            if isinstance(single_value, (int, float)) and single_key in PARAM_ORDER:
                 updates[single_key] = float(single_value)
                 explicit_keys.add(single_key)
+            elif isinstance(single_value, list) and single_key in {"x", "y"} and all(
+                isinstance(item, (int, float)) for item in single_value
+            ):
+                updates[single_key] = [float(item) for item in single_value]
+                explicit_keys.add(single_key)
 
-            if result.get("use_default") and state.current_asking in DEFAULT_VALUES:
+            if result.get("use_default") and state.current_asking in PARAM_ORDER:
                 key = state.current_asking
-                updates[key] = float(DEFAULT_VALUES[key])
+                updates[key] = get_default_value(key)
                 default_applied_keys.add(key)
 
             tentative = dict(state.params)
@@ -286,9 +308,9 @@ def chat(req: ChatRequest) -> ChatResponse:
                 unit_for_key = extracted_units.get(key)
                 if key == single_key and result.get("original_unit"):
                     unit_for_key = result.get("original_unit")
-                if unit_for_key:
+                if unit_for_key and isinstance(working_value, (int, float)):
                     converted_value, conversion_msg = convert_to_standard_unit(
-                        working_value, unit_for_key, key
+                        float(working_value), unit_for_key, key
                     )
                     working_value = converted_value
                     if conversion_msg:
@@ -340,7 +362,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                 response = f"⚠️ One thing to fix before we continue: {bad_msg}\n\n"
                 response += (
                     f"Please update **{PARAM_INFO[bad_key]['name']}**, or say "
-                    f"'default' to use **{format_value_with_unit(DEFAULT_VALUES[bad_key], bad_key)}**."
+                    f"'default' to use **{format_value_with_unit(get_default_value(bad_key), bad_key)}**."
                 )
                 state.current_asking = bad_key
                 state.mode = "guided"
@@ -371,5 +393,5 @@ def chat(req: ChatRequest) -> ChatResponse:
     state.messages.append(Message(role="assistant", content=response))
     _trim_messages(state)
 
-    final_params = {**DEFAULT_VALUES, **state.params} if state.mode == "complete" else None
+    final_params = build_final_configuration(state.params) if state.mode == "complete" else None
     return ChatResponse(assistant_message=response, state=state, final_params=final_params)

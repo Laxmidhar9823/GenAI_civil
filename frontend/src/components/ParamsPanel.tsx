@@ -19,7 +19,8 @@ function toTxtReport(params: Record<string, unknown>) {
   lines.push('----------------------------------------')
   lines.push('')
   for (const k of keys) {
-    lines.push(`${k}: ${String(params[k])}`)
+    const value = params[k]
+    lines.push(`${k}: ${typeof value === 'object' && value !== null ? JSON.stringify(value) : String(value)}`)
   }
   lines.push('')
   lines.push(`Date: ${new Date().toISOString()}`)
@@ -118,12 +119,24 @@ export default function ParamsPanel(props: {
                 className="btn primary" 
                 style={{ width: '100%' }}
                 onClick={() => {
-                   const txt = toTxtReport(finalParams)
-                   const blob = new Blob([txt], { type: 'text/plain' })
-                   downloadBlob('pavement-config.txt', blob)
+                 const prettyJson = JSON.stringify(finalParams, null, 2)
+                 const blob = new Blob([prettyJson], { type: 'application/json' })
+                 downloadBlob('pavement-config.json', blob)
                 }}
              >
-                Export Configuration
+               Export Final JSON
+             </button>
+
+             <button
+               className="btn"
+               style={{ width: '100%', marginTop: '10px' }}
+               onClick={() => {
+                 const txt = toTxtReport(finalParams)
+                 const blob = new Blob([txt], { type: 'text/plain' })
+                 downloadBlob('pavement-config.txt', blob)
+               }}
+             >
+               Export Text Report
              </button>
         </div>
       )}

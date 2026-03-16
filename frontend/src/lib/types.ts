@@ -9,7 +9,7 @@ export type ConversationMode = 'welcome' | 'guided' | 'free' | 'complete'
 
 export type ConversationState = {
   messages: Message[]
-  params: Record<string, number>
+  params: Record<string, unknown>
   user_provided_keys: string[]
   current_asking: string | null
   mode: ConversationMode
@@ -69,7 +69,7 @@ export type ResetResponse = {
 export type ChatResponse = {
   assistant_message?: string
   state: ConversationState
-  final_params?: Record<string, number>
+  final_params?: Record<string, unknown>
 }
 
 export type ErrorDetail = {

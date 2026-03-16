@@ -15,7 +15,7 @@ export default function AssistantPage() {
   const [schema, setSchema] = useState<SchemaResponse | null>(null)
   const [state, setState] = useState<ConversationState | null>(null)
   const [messages, setMessages] = useState<ChatMessage[]>([])
-  const [finalParamsFromResponse, setFinalParamsFromResponse] = useState<Record<string, number> | null>(null)
+  const [finalParamsFromResponse, setFinalParamsFromResponse] = useState<Record<string, unknown> | null>(null)
   const [busy, setBusy] = useState(false)
   const [, setSchemaBusy] = useState(false)
   const [, setHealthBusy] = useState(false)

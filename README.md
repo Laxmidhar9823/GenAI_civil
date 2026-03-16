@@ -120,7 +120,11 @@ Endpoints:
 - `POST /reset` → returns `{ assistant_message, state }` where `state` is a fresh `ConversationState`
 - `POST /chat` → request `{ user_input, state, llm_config }` and response `{ assistant_message, state, final_params? }`
   - `llm_config` is `{ ollama_url, model }`
-  - `final_params` is included when the conversation is complete
+  - `final_params` is included when the conversation is complete in nested format:
+    - `nodes` with default coordinates (`x` and `y` arrays)
+    - `slab` (`Emod`, `nu`, `t`)
+    - `subgrade` (`Kx`, `Ky`, `Kz`)
+    - `loads` (`x1`, `x2`, `y1`, `y2`, `q`) as single-item arrays
 
 `GET /config/schema` returns parameter definitions and defaults (both legacy UPPERCASE keys like `PARAM_INFO` and snake_case keys like `param_info`) so different frontends can integrate easily.
 

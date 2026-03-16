@@ -21,6 +21,36 @@ DEFAULT_VALUES = {
     "q": 0.1,
 }
 
+NODE_DEFAULT_VALUES = {
+    "x": [0.0, 1500.0, 3500.0],
+    "y": [0.0, 1500.0, 3500.0],
+}
+
+NODE_PARAM_INFO = {
+    "x": {
+        "name": "Node Coordinates (X)",
+        "technical_name": "Mesh Node Locations in X-direction",
+        "unit": "mm",
+        "category": "Mesh / Nodes",
+        "simple_explanation": "Reference mesh coordinates along slab length used by the solver grid.",
+        "typical_range": "0 to slab length",
+        "example": "[0, 1500, 3500]",
+        "icon": "🧭",
+        "default": [0.0, 1500.0, 3500.0],
+    },
+    "y": {
+        "name": "Node Coordinates (Y)",
+        "technical_name": "Mesh Node Locations in Y-direction",
+        "unit": "mm",
+        "category": "Mesh / Nodes",
+        "simple_explanation": "Reference mesh coordinates across slab width used by the solver grid.",
+        "typical_range": "0 to slab width",
+        "example": "[0, 1500, 3500]",
+        "icon": "🧭",
+        "default": [0.0, 1500.0, 3500.0],
+    },
+}
+
 PARAM_INFO = {
     "Emod": {
         "name": "Concrete Stiffness",
@@ -181,7 +211,18 @@ PARAM_INFO = {
     },
 }
 
+PARAM_INFO.update(NODE_PARAM_INFO)
+
+NODE_PARAM_KEYS = {"x", "y"}
+
+
+def get_default_value(key: str) -> Any:
+    if key in NODE_PARAM_KEYS:
+        return list(NODE_DEFAULT_VALUES[key])
+    return DEFAULT_VALUES[key]
+
 PARAM_CATEGORIES = {
+    "Mesh / Nodes": ["x", "y"],
     "Slab Size": ["a", "b", "t"],
     "Material Properties": ["Emod", "nu"],
     "Ground Support": ["Kx", "Ky", "Kz"],
@@ -189,7 +230,7 @@ PARAM_CATEGORIES = {
     "Load": ["q"],
 }
 
-PARAM_ORDER = ["a", "b", "t", "Emod", "nu", "Kx", "Ky", "Kz", "x1", "x2", "y1", "y2", "q"]
+PARAM_ORDER = ["a", "b", "x", "y", "t", "Emod", "nu", "Kx", "Ky", "Kz", "x1", "x2", "y1", "y2", "q"]
 
 LLM_INVOKE_TIMEOUT_SECONDS = 8.0
 
@@ -233,6 +274,8 @@ PARAM_ALIASES = {
     "y1": ["y1", "load start y", "start y"],
     "y2": ["y2", "load end y", "end y"],
     "q": ["q", "pressure", "tyre pressure", "tire pressure", "contact pressure"],
+    "x": ["node x", "x nodes", "x coordinates", "mesh x", "grid x"],
+    "y": ["node y", "y nodes", "y coordinates", "mesh y", "grid y"],
 }
 
 
@@ -254,9 +297,12 @@ def convert_to_standard_unit(value: float, from_unit: str, param_key: str) -> Tu
     return value, ""
 
 
-def format_value_with_unit(value: float, param_key: str) -> str:
+def format_value_with_unit(value: Any, param_key: str) -> str:
     info = PARAM_INFO.get(param_key, {})
     unit = info.get("unit", "")
+    if isinstance(value, list):
+        rendered = ", ".join(_compact_value(v) for v in value)
+        return f"[{rendered}]" if not unit or unit == "(no unit)" else f"[{rendered}] {unit}"
     if isinstance(value, float) and value == int(value):
         formatted = f"{int(value):,}"
     elif isinstance(value, float):
@@ -268,9 +314,33 @@ def format_value_with_unit(value: float, param_key: str) -> str:
     return formatted
 
 
-def validate_single_param(key: str, value: float, all_params: Dict[str, Any]) -> Tuple[bool, str]:
+def validate_single_param(key: str, value: Any, all_params: Dict[str, Any]) -> Tuple[bool, str]:
     """Validate a single parameter value."""
     info = PARAM_INFO.get(key, {})
+
+    if key in NODE_PARAM_KEYS:
+        if not isinstance(value, list) or not value:
+            return False, "Please provide at least two node coordinate values, for example [0, 1500, 3500]."
+        numeric: List[float] = []
+        for item in value:
+            if not isinstance(item, (int, float)):
+                return False, "Node coordinates must be numeric values."
+            numeric.append(float(item))
+        if len(numeric) < 2:
+            return False, "Please provide at least two node coordinates."
+        if any(v < 0 for v in numeric):
+            return False, "Node coordinates cannot be negative."
+        for i in range(1, len(numeric)):
+            if numeric[i] <= numeric[i - 1]:
+                return False, "Node coordinates must be in strictly increasing order."
+        if key == "x" and "a" in all_params and numeric[-1] > float(all_params["a"]):
+            return False, f"Last X node cannot exceed slab length ({all_params['a']} mm)."
+        if key == "y" and "b" in all_params and numeric[-1] > float(all_params["b"]):
+            return False, f"Last Y node cannot exceed slab width ({all_params['b']} mm)."
+        return True, ""
+
+    if not isinstance(value, (int, float)):
+        return False, "Please provide a numeric value."
 
     if "max_value" in info and value > info["max_value"]:
         return False, f"This value is too high! The maximum allowed is {info['max_value']} {info.get('unit', '')}."
@@ -299,7 +369,7 @@ def find_first_inconsistent_param(params: Dict[str, Any]) -> Optional[Tuple[str,
     """Return (param_key, error_msg) for the first parameter that becomes invalid given current state."""
     for key in PARAM_ORDER:
         if key in params:
-            ok, msg = validate_single_param(key, float(params[key]), params)
+            ok, msg = validate_single_param(key, params[key], params)
             if not ok:
                 return key, msg
     return None
@@ -321,7 +391,7 @@ def get_friendly_param_question(key: str, params: Dict[str, Any]) -> str:
     if key == "y2" and "y1" in params:
         question += f"ℹ️ *Note: This should be greater than Load Start ({params['y1']} mm).*\n\n"
 
-    question += f"🔧 **Default value:** {format_value_with_unit(DEFAULT_VALUES[key], key)}\n\n"
+    question += f"🔧 **Default value:** {format_value_with_unit(get_default_value(key), key)}\n\n"
     question += "👉 *Enter a value, or type 'default' or 'skip' to use the default.*"
     return question
 
@@ -412,6 +482,27 @@ def _parse_numeric_token(token: str) -> Optional[float]:
         return float(token)
     except ValueError:
         return None
+
+
+def _parse_node_list_candidates(text: str) -> Dict[str, List[float]]:
+    import re
+
+    out: Dict[str, List[float]] = {}
+    normalized = text.lower()
+    patterns = {
+        "x": r"\b(?:node\s*)?x(?!\d)(?:\s*(?:coordinates?|coords?|nodes?))?\s*(?:=|:|are|is)?\s*([0-9.,\s-]+)",
+        "y": r"\b(?:node\s*)?y(?!\d)(?:\s*(?:coordinates?|coords?|nodes?))?\s*(?:=|:|are|is)?\s*([0-9.,\s-]+)",
+    }
+
+    for key, pattern in patterns.items():
+        match = re.search(pattern, normalized)
+        if not match:
+            continue
+        nums = re.findall(r"-?\d+(?:\.\d+)?", match.group(1))
+        values = [float(n) for n in nums]
+        if len(values) >= 2:
+            out[key] = values
+    return out
 
 
 def _find_phrase_indices(tokens: List[str], phrase_tokens: List[str]) -> List[int]:
@@ -542,6 +633,8 @@ def generate_interactive_followup(params: Dict[str, Any]) -> str:
 
 
 def create_conversational_system_prompt() -> str:
+    parameter_catalog = {k: {**v, "default": get_default_value(k)} for k, v in PARAM_INFO.items()}
+
     return (
     """You are a production-grade Pavement Configuration Assistant for non-technical users.
 
@@ -576,13 +669,23 @@ FRIENDLY RESPONSE STYLE:
 
 PARAMETER CATALOG:
 """
-        + json.dumps({k: {**v, "default": DEFAULT_VALUES[k]} for k, v in PARAM_INFO.items()}, indent=2)
+    + json.dumps(parameter_catalog, indent=2)
+    + "\n\nNODE PARAMETER CATALOG (always included in final JSON):\n"
+    + json.dumps(NODE_PARAM_INFO, indent=2)
+    + "\n\nNODE DEFAULT VALUES:\n"
+    + json.dumps(NODE_DEFAULT_VALUES, indent=2)
     )
 
 
 def create_extraction_prompt(user_input: str, context: str, current_asking: Optional[str] = None) -> str:
     prompt = f"""### CONTEXT
 {context}
+
+### NODE CONTEXT
+- Ask the user for node X and Y coordinates like other parameters.
+- If user does not provide them, use defaults safely.
+- Node X defaults: {NODE_DEFAULT_VALUES['x']}
+- Node Y defaults: {NODE_DEFAULT_VALUES['y']}
 
 ### USER INPUT
 "{user_input}"
@@ -673,10 +776,13 @@ def process_user_input_with_llm(
         }
 
     heuristic_candidates = parse_multi_param_candidates(user_input)
-    if len(heuristic_candidates) >= 2:
-        extracted_multiple: Dict[str, float] = {}
+    node_list_candidates = _parse_node_list_candidates(user_input)
+    if len(heuristic_candidates) >= 2 or node_list_candidates:
+        extracted_multiple: Dict[str, Any] = {}
         for key, (value, _) in heuristic_candidates.items():
             extracted_multiple[key] = value
+        for key, values in node_list_candidates.items():
+            extracted_multiple[key] = values
         return {
             "understood_value": None,
             "use_default": False,
@@ -801,8 +907,8 @@ We're going to configure a few settings for your concrete slab (the road surface
 ---
 
 ### 📊 Progress
-- Completed: **0/13 (0%)**
-- Remaining: **13**
+- Completed: **0/15 (0%)**
+- Remaining: **15**
 - Next focus: **Slab Length**
 """
 
@@ -827,3 +933,35 @@ Great job! We've successfully configured all the parameters for your pavement an
 Use the download buttons below to save your configuration!
 """
     return msg
+
+
+def build_final_configuration(params: Dict[str, Any]) -> Dict[str, Any]:
+    """Build the final nested JSON payload expected by downstream consumers."""
+    merged = {**DEFAULT_VALUES, **params}
+
+    x_nodes = params.get("x") if isinstance(params.get("x"), list) else NODE_DEFAULT_VALUES["x"]
+    y_nodes = params.get("y") if isinstance(params.get("y"), list) else NODE_DEFAULT_VALUES["y"]
+
+    return {
+        "nodes": {
+            "x": [float(v) for v in x_nodes],
+            "y": [float(v) for v in y_nodes],
+        },
+        "slab": {
+            "Emod": float(merged["Emod"]),
+            "nu": float(merged["nu"]),
+            "t": float(merged["t"]),
+        },
+        "subgrade": {
+            "Kx": float(merged["Kx"]),
+            "Ky": float(merged["Ky"]),
+            "Kz": float(merged["Kz"]),
+        },
+        "loads": {
+            "x1": [float(merged["x1"])],
+            "x2": [float(merged["x2"])],
+            "y1": [float(merged["y1"])],
+            "y2": [float(merged["y2"])],
+            "q": [float(merged["q"])],
+        },
+    }

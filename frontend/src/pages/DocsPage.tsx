@@ -4,71 +4,77 @@ export default function DocsPage() {
   return (
     <div className="page-stack">
       <MotionSection className="content-card">
-        <h1>Docs</h1>
-        <p className="subtle-copy">Local-only setup, Ollama configuration, and practical troubleshooting.</p>
+        <h1>Setup and operating guide</h1>
+        <p className="subtle-copy">
+          Follow the steps below to launch backend/frontend and validate Ollama model connectivity from the assistant
+          workspace.
+        </p>
+      </MotionSection>
+
+      <MotionSection className="docs-grid">
+        <article className="doc-card interactive-lift">
+          <h3>1) Install dependencies</h3>
+          <ol>
+            <li>
+              Python dependencies: <span className="kbd">pip install -r requirements.txt</span>
+            </li>
+            <li>
+              Frontend dependencies: <span className="kbd">cd frontend && npm install</span>
+            </li>
+          </ol>
+        </article>
+
+        <article className="doc-card interactive-lift">
+          <h3>2) Start backend and frontend</h3>
+          <ol>
+            <li>
+              Start backend: <span className="kbd">uvicorn backend.main:app --reload --port 8000</span>
+            </li>
+            <li>
+              Health check: <span className="kbd">curl http://localhost:8000/health</span>
+            </li>
+            <li>
+              Start frontend: <span className="kbd">cd frontend && npm run dev</span>
+            </li>
+          </ol>
+        </article>
+
+        <article className="doc-card interactive-lift">
+          <h3>3) Configure Ollama</h3>
+          <ol>
+            <li>
+              Run daemon: <span className="kbd">ollama serve</span>
+            </li>
+            <li>
+              Use a model tag, for example <span className="kbd">kimi-k2.5:cloud</span> or{' '}
+              <span className="kbd">gemma3:12b</span>.
+            </li>
+            <li>
+              Set URL <span className="kbd">http://localhost:11434</span> and model name in Assistant.
+            </li>
+          </ol>
+        </article>
+
+        <article className="doc-card interactive-lift">
+          <h3>4) Troubleshooting</h3>
+          <ul>
+            <li>
+              Backend unreachable: confirm <span className="kbd">VITE_API_BASE_URL</span> and backend process status.
+            </li>
+            <li>
+              Ollama unavailable: verify URL, daemon, and model spelling.
+            </li>
+            <li>No assistant response: reset session and send the prompt again.</li>
+          </ul>
+        </article>
       </MotionSection>
 
       <MotionSection className="content-card">
-        <h2>1) Install dependencies</h2>
-        <ol>
-          <li>
-            Python backend deps: <code>pip install -r requirements.txt</code>
-          </li>
-          <li>
-            Frontend deps: <code>cd frontend && npm install</code>
-          </li>
-        </ol>
-      </MotionSection>
-
-      <MotionSection className="content-card">
-        <h2>2) Run local-only stack</h2>
-        <ol>
-          <li>Start backend: <code>uvicorn backend.main:app --reload --port 8000</code></li>
-          <li>
-            Verify backend is up: <code>curl http://localhost:8000/health</code>
-          </li>
-          <li>
-            (Optional) set frontend API URL: <code>VITE_API_BASE_URL=http://localhost:8000</code> before running dev/build.
-          </li>
-          <li>Start frontend: <code>cd frontend && npm run dev</code></li>
-          <li>Open <code>http://localhost:5173</code> and navigate to App.</li>
-        </ol>
-      </MotionSection>
-
-      <MotionSection className="content-card">
-        <h2>3) Configure Ollama</h2>
-        <ol>
-          <li>Install and run Ollama locally.</li>
-          <li>
-            Start daemon: <code>ollama serve</code>
-          </li>
-          <li>Pull your model, for example: <code>ollama pull gemma3:12b</code></li>
-          <li>In App, set URL to <code>http://localhost:11434</code> and your model name.</li>
-          <li>Use <strong>Check status</strong> to verify reachability through backend.</li>
-        </ol>
-      </MotionSection>
-
-      <MotionSection className="content-card">
-        <h2>4) Local-only + privacy notes</h2>
+        <h2>Execution notes</h2>
         <ul>
-          <li>This project is designed for local development on your machine.</li>
-          <li>Chat requests go to your configured local backend (<code>VITE_API_BASE_URL</code>).</li>
-          <li>Model inference uses your local Ollama endpoint; no cloud LLM dependency is required.</li>
-        </ul>
-      </MotionSection>
-
-      <MotionSection className="content-card">
-        <h2>5) Troubleshooting</h2>
-        <ul>
-          <li>
-            <strong>Backend unreachable:</strong> confirm API base URL and backend process on <code>:8000</code>.
-          </li>
-          <li>
-            <strong>Ollama unavailable:</strong> check Ollama daemon, URL, model spelling, and local firewall.
-          </li>
-          <li>
-            <strong>No response after send:</strong> reset session, then retry prompt to rebuild state.
-          </li>
+          <li>Chat requests go to your configured local backend endpoint.</li>
+          <li>Model inference runs through your configured Ollama host.</li>
+          <li>Cloud-tag model names (for example, <span className="kbd">kimi-k2.5:cloud</span>) are supported.</li>
         </ul>
       </MotionSection>
     </div>

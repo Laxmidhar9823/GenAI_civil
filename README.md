@@ -107,7 +107,7 @@ Backend endpoints:
 
 Backend environment variables:
 - `BACKEND_CORS_ORIGINS` (comma-separated) to override allowed CORS origins.
-  - Defaults remain local dev origins (`localhost:3000`, `5173`, `8080`, `8501`) when not set.
+  - Defaults remain local dev origins (`localhost:3000`, `5173`, `5174`, `5175`, `8080`, `8501`) when not set.
 - `BACKEND_ENV` (`development`/`dev`/`local`) to include extra exception details in error responses.
 
 > Ollama must be running and the target model must be pulled (same as Streamlit mode).

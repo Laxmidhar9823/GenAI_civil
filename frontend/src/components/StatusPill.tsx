@@ -6,22 +6,22 @@ export default function StatusPill({ status }: { status: OllamaCheckState }) {
       ? 'dot ok'
       : status.kind === 'needs_model'
         ? 'dot warn'
-      : status.kind === 'error'
-        ? 'dot err'
-        : status.kind === 'checking'
-          ? 'dot check'
-          : 'dot'
+        : status.kind === 'error'
+          ? 'dot err'
+          : status.kind === 'checking'
+            ? 'dot check'
+            : 'dot'
 
   const label =
     status.kind === 'ok'
       ? 'Ready'
       : status.kind === 'needs_model'
         ? 'Model missing'
-      : status.kind === 'error'
-        ? 'Ollama unavailable'
-        : status.kind === 'checking'
-          ? 'Checking…'
-          : 'Not checked'
+        : status.kind === 'error'
+          ? 'Ollama unavailable'
+          : status.kind === 'checking'
+            ? 'Checking...'
+            : 'Not checked'
 
   return (
     <span className="pill" role="status" aria-live="polite" aria-label={label}>

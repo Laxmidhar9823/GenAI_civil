@@ -57,21 +57,19 @@ export default function ParamsPanel(props: {
   return (
     <div className="card" aria-label="Progress and parameters">
       <div className="card-header">
-        <h2>Configuration Status</h2>
-        <span className="pill pill-soft">
-          {progress.total > 0 ? `${progress.done} / ${progress.total}` : '0 / 0'}
-        </span>
+        <h2>Configuration status</h2>
+        <span className="pill pill-soft">{progress.total > 0 ? `${progress.done} / ${progress.total}` : '0 / 0'}</span>
       </div>
-      
+
       <div className="progress-wrap">
-        <div className="progress-container" aria-label="Progress bar">
+        <div className="progress-container" aria-label="Progress bar" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent}>
           <div className="progress-bar" style={{ width: `${percent}%` }} />
         </div>
       </div>
 
       <div className="card-body">
         {rows.length ? (
-          <div style={{ overflowX: 'auto' }}>
+          <div className="table-wrap">
             <table className="table" aria-label="Collected parameters">
               <thead>
                 <tr>
@@ -86,7 +84,7 @@ export default function ParamsPanel(props: {
                     <td>
                       <span className="kbd">{r.key}</span>
                     </td>
-                    <td>{r.value === undefined || r.value === null || String(r.value) === '' ? <span className="sub">—</span> : String(r.value)}</td>
+                    <td>{r.value === undefined || r.value === null || String(r.value) === '' ? <span className="sub">N/A</span> : String(r.value)}</td>
                     <td className="sub">{r.desc || ''}</td>
                   </tr>
                 ))}
@@ -94,17 +92,17 @@ export default function ParamsPanel(props: {
             </table>
           </div>
         ) : (
-          <div className="sub">Parameter table will appear once the conversation starts.</div>
+          <div className="sub">Parameter table will appear after the conversation begins.</div>
         )}
 
         {finalParams ? (
-          <div style={{ marginTop: 16, display: 'grid', gap: 10 }}>
+          <div className="final-actions">
             <div className="pill" aria-label="Final configuration ready">
               <span className="dot ok" aria-hidden="true" />
               <span>Final configuration ready</span>
             </div>
 
-            <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+            <div className="final-downloads">
               <button
                 type="button"
                 className="btn primary"

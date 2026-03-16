@@ -53,6 +53,10 @@ class OllamaStatusResponse(BaseModel):
     available_models: List[str]
     timeout_seconds: float
     error: Optional[str] = None
+    detail: Optional[str] = None
+    normalized_model: Optional[str] = None
+    matched_model: Optional[str] = None
+    model_suggestions: List[str] = Field(default_factory=list)
 
 
 class ErrorDetail(BaseModel):

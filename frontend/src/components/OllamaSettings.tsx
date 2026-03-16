@@ -11,6 +11,7 @@ export default function OllamaSettings(props: {
   apiBaseUrl: string
 }) {
   const { ollamaUrl, setOllamaUrl, model, setModel, status, onCheckNow, apiBaseUrl } = props
+  const isCloudModel = model.trim().toLowerCase().endsWith(':cloud')
 
   return (
     <div className="card" aria-label="LLM settings">
@@ -21,7 +22,9 @@ export default function OllamaSettings(props: {
       <div className="card-body">
         <div className="row">
           <div>
-            <label className="label" htmlFor="ollamaUrl">Ollama URL</label>
+            <label className="label" htmlFor="ollamaUrl">
+              Ollama URL
+            </label>
             <input
               id="ollamaUrl"
               className="input"
@@ -31,11 +34,15 @@ export default function OllamaSettings(props: {
               inputMode="url"
               autoComplete="off"
             />
-            <div className="help">Example: <span className="kbd">http://localhost:11434</span></div>
+            <div className="field-meta">
+              Example: <span className="kbd">http://localhost:11434</span>
+            </div>
           </div>
 
           <div>
-            <label className="label" htmlFor="ollamaModel">Model</label>
+            <label className="label" htmlFor="ollamaModel">
+              Model
+            </label>
             <input
               id="ollamaModel"
               className="input"
@@ -44,34 +51,48 @@ export default function OllamaSettings(props: {
               placeholder="gemma3:12b"
               autoComplete="off"
             />
-            <div className="help">Example: <span className="kbd">gemma3:12b</span></div>
+            <div className="field-meta">
+              Examples: <span className="kbd">kimi-k2.5:cloud</span> or <span className="kbd">gemma3:12b</span>
+            </div>
           </div>
 
-          <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+          <div className="setting-actions">
             <button type="button" className="btn" onClick={onCheckNow}>
               Check status
             </button>
-            <div className="help" style={{ marginTop: 8 }}>
+            <span>
               Backend API: <span className="kbd">{apiBaseUrl}</span>
-            </div>
+            </span>
           </div>
+
           {'detail' in status && status.detail ? (
-            <div className="help" role="status" aria-live="polite" style={{ lineHeight: 1.55 }}>
+            <div className="status-detail" role="status" aria-live="polite">
               {status.detail}
             </div>
           ) : null}
+
           {(status.kind === 'error' || status.kind === 'needs_model') && (
-            <div className="help" role="alert" aria-live="polite">
-              Commands:{' '}
-              <span className="kbd">ollama serve</span> <span className="kbd">ollama list</span>{' '}
-              <span className="kbd">ollama pull {model}</span>
+            <div className="status-detail warning" role="alert" aria-live="polite">
+              Commands: <span className="kbd">ollama serve</span> <span className="kbd">ollama list</span>{' '}
+              {!isCloudModel ? <span className="kbd">ollama pull {model}</span> : <span className="kbd">use exact cloud tag</span>}
             </div>
           )}
+
           {status.kind === 'needs_model' ? (
-            <div className="help" role="alert" aria-live="polite">
-              Model <span className="kbd">{status.model}</span> is not installed. Run{' '}
-              <span className="kbd">ollama pull {status.model}</span>, then check status again.
+            <div className="status-detail warning" role="alert" aria-live="polite">
+              Model <span className="kbd">{status.model}</span> is not installed or not visible from this Ollama host.
+              {!status.model.toLowerCase().endsWith(':cloud') ? (
+                <>
+                  {' '}
+                  Run <span className="kbd">ollama pull {status.model}</span> and check status again.
+                </>
+              ) : (
+                <> Verify the cloud model tag in your Ollama account and check status again.</>
+              )}
               {status.availableModels.length ? ` Available now: ${status.availableModels.slice(0, 5).join(', ')}.` : ''}
+              {'suggestedModels' in status && status.suggestedModels?.length
+                ? ` Suggested: ${status.suggestedModels.join(', ')}.`
+                : ''}
             </div>
           ) : null}
         </div>

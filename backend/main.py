@@ -17,13 +17,20 @@ from backend.agent_logic import (
     convert_to_standard_unit,
     format_value_with_unit,
     generate_completion_message,
+    generate_interactive_followup,
     generate_welcome_message,
-    get_friendly_param_question,
     validate_single_param,
     build_conversation_context,
     find_first_inconsistent_param,
+    with_progress_tail,
 )
-from backend.ollama import check_ollama_connection, get_ollama_llm
+from backend.ollama import (
+    check_ollama_connection,
+    get_ollama_llm,
+    normalize_model_name,
+    resolve_model_match,
+    suggest_available_models,
+)
 from backend.schemas import (
     ChatRequest,
     ChatResponse,
@@ -39,9 +46,17 @@ APP_NAME = "Pavement Assistant Backend"
 APP_VERSION = "1.0.0"
 DEFAULT_CORS_ORIGINS = [
     "http://localhost:3000",
+    "http://127.0.0.1:3000",
     "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:5174",
+    "http://127.0.0.1:5174",
+    "http://localhost:5175",
+    "http://127.0.0.1:5175",
     "http://localhost:8080",
+    "http://127.0.0.1:8080",
     "http://localhost:8501",
+    "http://127.0.0.1:8501",
 ]
 APP_ENV = os.getenv("BACKEND_ENV", os.getenv("ENV", "production")).lower()
 IS_DEV = APP_ENV in {"dev", "development", "local"}
@@ -139,12 +154,32 @@ def ollama_status(
     connected, model_available, available_models, error = check_ollama_connection(
         ollama_url, model, timeout_seconds
     )
+    matched_model = resolve_model_match(model, available_models) if connected else None
+    suggestions = (
+        suggest_available_models(model, available_models)
+        if connected and not model_available
+        else []
+    )
+    detail = None
+    if not connected and error:
+        detail = error
+    elif connected and not model_available:
+        detail = f'Model "{model}" is not available on this Ollama server.'
+        if suggestions:
+            detail += f" Did you mean: {', '.join(suggestions)}?"
+    elif connected and matched_model:
+        detail = f'Model "{matched_model}" is available.'
+
     return OllamaStatusResponse(
         connected=connected,
         model_available=model_available,
         available_models=available_models,
         timeout_seconds=timeout_seconds,
         error=error,
+        detail=detail,
+        normalized_model=normalize_model_name(model),
+        matched_model=matched_model,
+        model_suggestions=suggestions,
     )
 
 
@@ -190,153 +225,147 @@ def chat(req: ChatRequest) -> ChatResponse:
     if lower_input in ["let's begin", "lets begin", "start", "begin", "guide me", "help me"]:
         state.mode = "guided"
         missing = [k for k in PARAM_ORDER if k not in state.params]
-        if missing:
-            state.current_asking = missing[0]
-            response = "Great! Let's go through this step by step. 😊\n\n"
-            response += get_friendly_param_question(missing[0], state.params)
-        else:
+        if not missing:
             state.mode = "complete"
             response = generate_completion_message(state.params, state.user_provided_keys)
-
-    elif check_use_all_defaults_intent(req.user_input):
-        missing = [k for k in PARAM_ORDER if k not in state.params]
-        for key in missing:
-            state.params[key] = DEFAULT_VALUES[key]
-        state.mode = "complete"
-        if missing:
-            response = f"Perfect! I've filled in the remaining {len(missing)} values with defaults. 👍\n\n"
         else:
-            response = "Great! All parameters were already set. 👍\n\n"
-
-        bad = find_first_inconsistent_param(state.params)
-        if bad:
-            bad_key, bad_msg = bad
-            state.mode = "guided"
-            state.current_asking = bad_key
-            response += f"⚠️ One quick check: {bad_msg}\n\n"
-            response += get_friendly_param_question(bad_key, state.params)
-        else:
-            response += generate_completion_message(state.params, state.user_provided_keys)
-
+            state.current_asking = missing[0]
+            response = (
+                "Great, let's do this together. You can share as many details as you already know in one message, "
+                "and I'll capture all of them at once.\n\n"
+            )
+            response += generate_interactive_followup(state.params)
     else:
         llm = get_ollama_llm(req.llm_config.ollama_url, req.llm_config.model)
         result = process_user_input_with_llm(req.user_input, llm, context, state.current_asking)
 
-        response = result.get("friendly_response", "")
-
-        # If the LLM extracted multiple parameters, apply them first so the "next question" logic
-        # doesn't re-ask for values that were already provided.
-        if result.get("extracted_multiple"):
-            for key, val in result["extracted_multiple"].items():
-                if key in DEFAULT_VALUES and key not in state.params:
-                    is_valid, _ = validate_single_param(key, val, state.params)
-                    if is_valid:
-                        state.params[key] = val
-                        if key not in state.user_provided_keys:
-                            state.user_provided_keys.append(key)
-
-        # Match the Streamlit reducer semantics in app.py
-        if result.get("understood_value") is not None:
-            value = result["understood_value"]
-            param_key = result.get("parameter_key") or state.current_asking
-
-            if param_key:
-                original_unit = result.get("original_unit")
-                if original_unit:
-                    converted_value, conversion_msg = convert_to_standard_unit(value, original_unit, param_key)
-                    if conversion_msg:
-                        response = f"📐 {conversion_msg}\n\n" + response
-                    value = converted_value
-
-                is_valid, error_msg = validate_single_param(param_key, value, state.params)
-
-                if is_valid:
-                    state.params[param_key] = value
-                    if param_key not in state.user_provided_keys:
-                        state.user_provided_keys.append(param_key)
-
-                    info = PARAM_INFO[param_key]
-                    response = (
-                        f"✅ Got it! **{info['name']}** is set to **{format_value_with_unit(value, param_key)}**.\n\n"
-                    )
-
-                    bad = find_first_inconsistent_param(state.params)
-                    if bad:
-                        bad_key, bad_msg = bad
-                        state.mode = "guided"
-                        state.current_asking = bad_key
-                        response += f"⚠️ One quick check: {bad_msg}\n\n"
-                        response += get_friendly_param_question(bad_key, state.params)
-                    else:
-                        missing = [k for k in PARAM_ORDER if k not in state.params]
-                        if missing:
-                            state.current_asking = missing[0]
-                            response += "Moving on to the next setting...\n\n"
-                            response += get_friendly_param_question(missing[0], state.params)
-                        else:
-                            state.mode = "complete"
-                            response += generate_completion_message(state.params, state.user_provided_keys)
-                else:
-                    response = f"⚠️ Hmm, that value has an issue: {error_msg}\n\n"
-                    response += (
-                        "Could you try a different value? Or say 'default' to use "
-                        f"**{format_value_with_unit(DEFAULT_VALUES[param_key], param_key)}**."
-                    )
-
-        elif result.get("use_all_defaults"):
+        use_all_defaults = bool(result.get("use_all_defaults") or check_use_all_defaults_intent(req.user_input))
+        if use_all_defaults:
             missing = [k for k in PARAM_ORDER if k not in state.params]
             for key in missing:
                 state.params[key] = DEFAULT_VALUES[key]
+
             state.mode = "complete"
-
             if missing:
-                response = f"Perfect! I've filled in the remaining {len(missing)} values with defaults. 👍\n\n"
+                response = f"Perfect. I filled the remaining {len(missing)} values with safe defaults.\n\n"
             else:
-                response = "Great! All parameters were already set. 👍\n\n"
+                response = "Everything is already filled in.\n\n"
+            response += generate_completion_message(state.params, state.user_provided_keys)
+        else:
+            extracted_multiple = result.get("extracted_multiple") or {}
+            extracted_units = result.get("extracted_units") or {}
+            updates: Dict[str, float] = {}
+            explicit_keys = set()
+            default_applied_keys = set()
+
+            if isinstance(extracted_multiple, dict):
+                for key, val in extracted_multiple.items():
+                    if key in DEFAULT_VALUES and isinstance(val, (int, float)):
+                        updates[key] = float(val)
+                        explicit_keys.add(key)
+
+            single_value = result.get("understood_value")
+            single_key = result.get("parameter_key") or state.current_asking
+            if isinstance(single_value, (int, float)) and single_key in DEFAULT_VALUES:
+                updates[single_key] = float(single_value)
+                explicit_keys.add(single_key)
+
+            if result.get("use_default") and state.current_asking in DEFAULT_VALUES:
+                key = state.current_asking
+                updates[key] = float(DEFAULT_VALUES[key])
+                default_applied_keys.add(key)
+
+            tentative = dict(state.params)
+            applied: List[str] = []
+            problems: List[str] = []
+            conversion_notes: List[str] = []
+
+            for key, value in updates.items():
+                working_value = value
+                unit_for_key = extracted_units.get(key)
+                if key == single_key and result.get("original_unit"):
+                    unit_for_key = result.get("original_unit")
+                if unit_for_key:
+                    converted_value, conversion_msg = convert_to_standard_unit(
+                        working_value, unit_for_key, key
+                    )
+                    working_value = converted_value
+                    if conversion_msg:
+                        conversion_notes.append(conversion_msg)
+
+                is_valid, error_msg = validate_single_param(key, working_value, tentative)
+                if is_valid:
+                    tentative[key] = working_value
+                    applied.append(key)
+                else:
+                    info = PARAM_INFO.get(key, {"name": key})
+                    problems.append(f"{info['name']}: {error_msg}")
+
+            if applied:
+                state.params = tentative
+                for key in applied:
+                    if key in explicit_keys and key not in default_applied_keys and key not in state.user_provided_keys:
+                        state.user_provided_keys.append(key)
+
+            if not applied and not problems:
+                response = result.get("friendly_response") or (
+                    "I want to make sure I capture this correctly. You can share multiple details together, "
+                    "for example: length, width, thickness, and pressure in one message."
+                )
+            else:
+                parts: List[str] = []
+                if result.get("friendly_response"):
+                    parts.append(str(result["friendly_response"]).strip())
+
+                if conversion_notes:
+                    parts.append("\n".join(f"📐 {note}" for note in conversion_notes))
+
+                if applied:
+                    captured = "\n".join(
+                        f"- **{PARAM_INFO[k]['name']}**: **{format_value_with_unit(state.params[k], k)}**"
+                        for k in applied
+                    )
+                    parts.append(f"Captured now:\n{captured}")
+
+                if problems:
+                    issues = "\n".join(f"- {p}" for p in problems)
+                    parts.append(f"I need one quick correction:\n{issues}")
+
+                response = "\n\n".join(p for p in parts if p)
 
             bad = find_first_inconsistent_param(state.params)
             if bad:
                 bad_key, bad_msg = bad
-                state.mode = "guided"
+                response = f"⚠️ One thing to fix before we continue: {bad_msg}\n\n"
+                response += (
+                    f"Please update **{PARAM_INFO[bad_key]['name']}**, or say "
+                    f"'default' to use **{format_value_with_unit(DEFAULT_VALUES[bad_key], bad_key)}**."
+                )
                 state.current_asking = bad_key
-                response += f"⚠️ One quick check: {bad_msg}\n\n"
-                response += get_friendly_param_question(bad_key, state.params)
-            else:
-                response += generate_completion_message(state.params, state.user_provided_keys)
-
-        elif result.get("use_default") and state.current_asking:
-            param_key = state.current_asking
-            default_val = DEFAULT_VALUES[param_key]
-            state.params[param_key] = default_val
-
-            info = PARAM_INFO[param_key]
-            response = (
-                f"👍 No problem! Using the default value of **{format_value_with_unit(default_val, param_key)}** "
-                f"for {info['name']}.\n\n"
-            )
-
-            bad = find_first_inconsistent_param(state.params)
-            if bad:
-                bad_key, bad_msg = bad
                 state.mode = "guided"
-                state.current_asking = bad_key
-                response += f"⚠️ One quick check: {bad_msg}\n\n"
-                response += get_friendly_param_question(bad_key, state.params)
             else:
                 missing = [k for k in PARAM_ORDER if k not in state.params]
                 if missing:
                     state.current_asking = missing[0]
-                    response += get_friendly_param_question(missing[0], state.params)
+                    state.mode = "guided"
+                    response = f"{response}\n\n{generate_interactive_followup(state.params)}".strip()
                 else:
+                    state.current_asking = None
                     state.mode = "complete"
-                    response += generate_completion_message(state.params, state.user_provided_keys)
+                    response = f"{response}\n\n{generate_completion_message(state.params, state.user_provided_keys)}".strip()
 
+            if not response:
+                response = (
+                    "I want to make sure I understood you correctly. "
+                    "Please share any values you know, and I can capture several at once."
+                )
 
-        if not response:
-            response = (
-                "I'm not quite sure I understood that. Could you try again? "
-                "You can enter a number, or say 'default' to use the suggested value. 😊"
-            )
+    response = with_progress_tail(
+        response,
+        state.params,
+        state.current_asking,
+        include_progress=(state.mode != "complete"),
+    )
 
     state.messages.append(Message(role="assistant", content=response))
     _trim_messages(state)

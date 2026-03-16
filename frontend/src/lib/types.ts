@@ -46,13 +46,19 @@ export type OllamaCheckState =
   | { kind: 'unknown' }
   | { kind: 'checking' }
   | { kind: 'ok'; detail?: string }
-  | { kind: 'needs_model'; model: string; availableModels: string[]; detail?: string }
+  | { kind: 'needs_model'; model: string; availableModels: string[]; suggestedModels?: string[]; detail?: string }
   | { kind: 'error'; detail?: string }
 
 export type OllamaStatusResponse = {
   connected: boolean
   model_available: boolean
   available_models: string[]
+  timeout_seconds?: number
+  error?: string | null
+  detail?: string | null
+  normalized_model?: string | null
+  matched_model?: string | null
+  model_suggestions?: string[]
 }
 
 export type ResetResponse = {

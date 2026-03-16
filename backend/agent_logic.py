@@ -1,5 +1,4 @@
 import json
-import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -192,77 +191,52 @@ PARAM_CATEGORIES = {
 PARAM_ORDER = ["a", "b", "t", "Emod", "nu", "Kx", "Ky", "Kz", "x1", "x2", "y1", "y2", "q"]
 
 USE_ALL_DEFAULTS_PATTERNS = [
-    "use all defaults", "fill all defaults", "default all", "skip all",
-    "use defaults", "all defaults", "defaults for all", "default for all",
-    "default for the rest", "defaults for the rest", "use default for the rest",
-    "use defaults for the rest", "default for rest", "defaults for rest",
-    "take default for the rest", "take defaults for the rest",
-    "take default for rest", "take defaults for rest",
-    "fill in the rest", "fill the rest", "fill rest",
-    "default for remaining", "defaults for remaining", "use default for remaining",
-    "use defaults for remaining", "default remaining", "defaults remaining",
-    "take default for remaining", "take defaults for remaining",
-    "not sure about remaining", "not sure remaining",
-    "default for everything else", "defaults for everything else",
-    "use default for everything", "use defaults for everything",
-    "default everything else", "defaults everything else",
-    "fill in everything else", "fill everything else",
-    "skip the rest", "skip rest", "skip remaining", "skip everything",
-    "skip all remaining", "skip the remaining",
-    "just use defaults", "just defaults", "go with defaults",
-    "proceed with defaults", "continue with defaults",
-    "put the defaults", "put defaults", "just put defaults",
-    "yes use defaults", "yes defaults", "yeah defaults",
-    "ok use defaults", "okay defaults", "sure defaults",
-    "sure use the defaults", "alright use defaults", "alright defaults",
-    "fill with defaults", "fill remaining with defaults", "fill rest with defaults",
-    "auto fill", "autofill", "auto-fill",
-    "complete with defaults", "complete it with defaults", "finish with defaults",
-    "i'm done", "im done", "that's all", "thats all", "that's it", "thats it",
-    "nothing else", "no more values", "don't know the rest", "dont know the rest",
-    "i don't know", "i dont know", "no idea", "not sure about the rest",
-    "no clue", "idk", "have no idea", "only know those",
-    "that's all i have", "thats all i have", "that's all the info", "all the info i have",
-    "only know these", "only have these", "don't have more", "dont have more",
+    "use defaults",
+    "use all defaults",
+    "defaults for remaining",
+    "defaults for the rest",
+    "use defaults for remaining",
+    "use defaults for the rest",
+    "fill remaining with defaults",
+    "fill rest with defaults",
+    "skip the rest",
+    "skip remaining",
+    "i don't know the rest",
+    "thats all i have",
 ]
+
+SINGLE_DEFAULT_PATTERNS = {
+    "default",
+    "skip",
+    "use default",
+    "fine",
+    "ok",
+    "okay",
+    "yes",
+    "sure",
+}
+
+PARAM_ALIASES = {
+    "a": ["a", "length", "slab length", "x length", "x dimension"],
+    "b": ["b", "width", "slab width", "y length", "y dimension"],
+    "t": ["t", "thickness", "slab thickness", "depth"],
+    "Emod": ["emod", "modulus", "modulus of elasticity", "elasticity"],
+    "nu": ["nu", "poisson", "poissons ratio", "poisson ratio"],
+    "Kx": ["kx", "stiffness x", "foundation x"],
+    "Ky": ["ky", "stiffness y", "foundation y"],
+    "Kz": ["kz", "stiffness z", "foundation z"],
+    "x1": ["x1", "load start x", "start x"],
+    "x2": ["x2", "load end x", "end x"],
+    "y1": ["y1", "load start y", "start y"],
+    "y2": ["y2", "load end y", "end y"],
+    "q": ["q", "pressure", "tyre pressure", "tire pressure", "contact pressure"],
+}
 
 
 def check_use_all_defaults_intent(user_input: str) -> bool:
     lower_input = user_input.lower().strip()
-
-    # Guardrail: avoid accidental "fill everything with defaults" when the user is merely confused
-    # (e.g. "I don't know what Emod is"). We only consider this intent if the message references
-    # defaults/rest/remaining/autofill/skip-all semantics.
-    if not (
-        re.search(r"\bdefault(s)?\b", lower_input)
-        or re.search(r"\b(rest|remaining)\b", lower_input)
-        or "everything else" in lower_input
-        or re.search(r"\bautofill\b|\bauto[- ]fill\b", lower_input)
-        or re.search(r"\bskip\b\s+\b(all|everything)\b", lower_input)
-    ):
-        return False
-
-    for pattern in USE_ALL_DEFAULTS_PATTERNS:
-        if pattern in lower_input:
-            return True
-
-    flexible_patterns = [
-        r"\b(use|take|go with|apply|set|put)\s+(the\s+)?default(s)?(\s+values?)?\s+(for\s+)?(the\s+)?(rest|remaining|everything|all|others?)(\s+(of\s+)?(the\s+)?(parameters?|values?|settings?|fields?))?\b",
-        r"\bdefault(s)?(\s+values?)?\s+(for\s+)?(the\s+)?(rest|remaining|everything|all|others?)(\s+(of\s+)?(the\s+)?(parameters?|values?|settings?|fields?))?\b",
-        r"\bskip\s+(the\s+)?(rest|remaining|everything|all|others?)\b",
-        r"\b(fill|complete|finish)\s+(the\s+)?(rest\s+)?(it\s+)?(with\s+)?default(s)?\b",
-        r"\bi\s+(don'?t|do not)\s+(know|have)\s+(the\s+)?(rest|remaining|other)\b",
-        r"\bjust\s+(use\s+)?default(s)?\b",
-        r"\bfill\s+(in\s+)?(the\s+)?(rest|remaining|everything)\b",
-        r"\b(rest|remaining)\s+(with\s+)?default(s)?\b",
-        r"\b(yeah|ok|sure|alright)\s+(just\s+)?(fill|use|put)\s+(in\s+)?(the\s+)?(rest|defaults?|everything)\b",
-        r"\bi\s+(only\s+)?(know|have)\s+(those|these)\s*(values?)?\b",
-        r"\bidk\s+(the\s+)?(rest|remaining)?\b",
-        r"\bno\s+clue\s+(about\s+)?(the\s+)?(rest|remaining|others?|these)?\b",
-        r"\bnot\s+sure\s+(about\s+)?(the\s+)?(rest|remaining|others?)?\b",
-    ]
-
-    return any(re.search(pattern, lower_input) for pattern in flexible_patterns)
+    compact = " ".join(lower_input.split())
+    return any(pattern in compact for pattern in USE_ALL_DEFAULTS_PATTERNS)
 
 
 def convert_to_standard_unit(value: float, from_unit: str, param_key: str) -> Tuple[float, str]:
@@ -367,32 +341,237 @@ def build_conversation_context(messages: List[Dict], params: Dict[str, Any]) -> 
     return "\n".join(context_parts)
 
 
+def _compact_value(value: Any) -> str:
+    if isinstance(value, float) and value == int(value):
+        return str(int(value))
+    if isinstance(value, float):
+        return f"{value:.4g}"
+    return str(value)
+
+
+def _extract_first_number_with_unit(text: str) -> Tuple[Optional[float], Optional[str]]:
+    s = text.strip()
+    n = len(s)
+
+    i = 0
+    while i < n and not (s[i].isdigit() or s[i] == "-"):
+        i += 1
+    if i >= n:
+        return None, None
+
+    j = i
+    seen_digit = False
+    while j < n:
+        ch = s[j]
+        if ch.isdigit():
+            seen_digit = True
+            j += 1
+            continue
+        if ch in {"-", ".", ","}:
+            j += 1
+            continue
+        break
+
+    if not seen_digit:
+        return None, None
+
+    raw = s[i:j].replace(",", "")
+    try:
+        value = float(raw)
+    except ValueError:
+        return None, None
+
+    k = j
+    while k < n and s[k].isspace():
+        k += 1
+    u = k
+    while u < n and (s[u].isalpha() or s[u] == "%"):
+        u += 1
+
+    unit = s[k:u].lower() if u > k else None
+    return value, unit
+
+
+def _tokenize_for_numbers(text: str) -> List[str]:
+    cleaned_chars: List[str] = []
+    for ch in text.lower():
+        if ch.isalnum() or ch in {".", "-", "%"}:
+            cleaned_chars.append(ch)
+        else:
+            cleaned_chars.append(" ")
+    return "".join(cleaned_chars).split()
+
+
+def _parse_numeric_token(token: str) -> Optional[float]:
+    if token in {"", ".", "-", "-."}:
+        return None
+    try:
+        return float(token)
+    except ValueError:
+        return None
+
+
+def _find_phrase_indices(tokens: List[str], phrase_tokens: List[str]) -> List[int]:
+    indices: List[int] = []
+    n = len(phrase_tokens)
+    if n == 0:
+        return indices
+    for i in range(0, len(tokens) - n + 1):
+        if tokens[i : i + n] == phrase_tokens:
+            indices.append(i)
+    return indices
+
+
+def parse_multi_param_candidates(text: str) -> Dict[str, Tuple[float, Optional[str]]]:
+    tokens = _tokenize_for_numbers(text)
+    if not tokens:
+        return {}
+
+    numbers: List[Tuple[int, float, Optional[str]]] = []
+    for i, tok in enumerate(tokens):
+        val = _parse_numeric_token(tok)
+        if val is None:
+            continue
+        unit = tokens[i + 1] if i + 1 < len(tokens) and tokens[i + 1].isalpha() else None
+        numbers.append((i, val, unit))
+
+    if not numbers:
+        return {}
+
+    out: Dict[str, Tuple[float, Optional[str]]] = {}
+    for key, aliases in PARAM_ALIASES.items():
+        best_match: Optional[Tuple[float, Optional[str], int]] = None
+        for alias in aliases:
+            phrase_tokens = alias.split()
+            starts = _find_phrase_indices(tokens, phrase_tokens)
+            if not starts:
+                continue
+            for start in starts:
+                end = start + len(phrase_tokens) - 1
+                chosen: Optional[Tuple[int, float, Optional[str]]] = None
+                for idx, val, unit in numbers:
+                    if idx > end and idx - end <= 4:
+                        chosen = (idx, val, unit)
+                        break
+                if chosen is None:
+                    for idx, val, unit in reversed(numbers):
+                        if idx < start and start - idx <= 3:
+                            chosen = (idx, val, unit)
+                            break
+                if chosen is not None:
+                    dist = abs(chosen[0] - end)
+                    if best_match is None or dist < best_match[2]:
+                        best_match = (chosen[1], chosen[2], dist)
+        if best_match is not None:
+            out[key] = (best_match[0], best_match[1])
+
+    return out
+
+
+def _progress_lines(params: Dict[str, Any], current_asking: Optional[str]) -> str:
+    total = len(PARAM_ORDER)
+    done = len([k for k in PARAM_ORDER if k in params])
+    pct = int(round((done / total) * 100)) if total else 0
+    remaining = total - done
+
+    next_key = current_asking if current_asking else next((k for k in PARAM_ORDER if k not in params), None)
+
+    lines = [
+        "### 📊 Progress",
+        f"- Completed: **{done}/{total} ({pct}%)**",
+        f"- Remaining: **{remaining}**",
+    ]
+
+    if next_key and next_key in PARAM_INFO:
+        lines.append(f"- Next focus: **{PARAM_INFO[next_key]['name']}**")
+
+    remembered = [k for k in PARAM_ORDER if k in params][-4:]
+    if remembered:
+        snapshot = ", ".join(
+            f"{PARAM_INFO[k]['name']}: {format_value_with_unit(float(params[k]), k) if isinstance(params[k], (int, float)) else _compact_value(params[k])}"
+            for k in remembered
+        )
+        lines.append(f"- I remember: {snapshot}")
+
+    return "\n".join(lines)
+
+
+def with_progress_tail(message: str, params: Dict[str, Any], current_asking: Optional[str], include_progress: bool = True) -> str:
+    if not include_progress:
+        return message
+    if "### 📊 Progress" in message:
+        return message
+    return f"{message.rstrip()}\n\n---\n\n{_progress_lines(params, current_asking)}\n\n---"
+
+
+def generate_interactive_followup(params: Dict[str, Any]) -> str:
+    missing = [k for k in PARAM_ORDER if k not in params]
+    if not missing:
+        return ""
+
+    grouped: Dict[str, List[str]] = {}
+    for key in missing:
+        category = PARAM_INFO[key].get("category", "Other")
+        grouped.setdefault(category, []).append(key)
+
+    lines = [
+        "You're doing great. If you know multiple details, share them in one message and I'll capture them together.",
+        "",
+        "You can give any of these next:",
+    ]
+
+    shown_categories = 0
+    for category, keys in grouped.items():
+        if shown_categories >= 3:
+            break
+        names = ", ".join(PARAM_INFO[k]["name"] for k in keys[:3])
+        lines.append(f"- **{category}:** {names}")
+        shown_categories += 1
+
+    lines.extend(
+        [
+            "",
+            "Tip: You can reply like \"length 4.5 m, width 3.5 m, thickness 220 mm\".",
+            "If you'd like, say \"use defaults for remaining\" and I'll finish the rest safely.",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def create_conversational_system_prompt() -> str:
     return (
-        """You are a friendly Pavement Configuration Assistant helping non-technical users set up parameters for rigid pavement analysis.
+    """You are a production-grade Pavement Configuration Assistant for non-technical users.
 
-Your personality:
-- Warm, patient, and encouraging
-- Explain technical concepts in simple, everyday language
-- Use analogies when helpful
-- Never use jargon without explanation
-- Celebrate progress and reassure users
+PRIMARY GOAL:
+Help a beginner provide all required inputs through a natural, supportive conversation.
 
-Your tasks:
-1. Help users understand what each parameter means
-2. Extract parameter values from natural language
-3. Handle unit conversions (meters to mm, etc.)
-4. Validate values and explain why if something is wrong
-5. Guide users through the configuration process
+PERSONA AND TONE:
+- Warm, calm, encouraging, and human.
+- Explain in plain language first, technical term second (if needed).
+- Never sound robotic or command-like.
+- Proactively guide with short suggestions and examples.
 
-IMPORTANT RULES FOR RESPONSES:
-- Always acknowledge what the user said
-- If they provide a value, confirm you understood it
-- If there's an error, explain it kindly and suggest a fix
-- Keep responses concise but warm
-- Use emojis sparingly to be friendly
+BEHAVIOR RULES:
+- Never expose internal JSON structure, keys, or implementation details to users.
+- Treat user messages as conversation, not form fields.
+- If the user gives multiple values, extract all relevant ones.
+- If the user corrects something, trust the latest value.
+- If user is unsure, offer defaults kindly.
+- If ambiguous, ask one focused clarification question.
 
-PARAMETER INFORMATION:
+EXTRACTION RULES:
+- Extract numbers and units from free text.
+- Recognize simple confirmations for defaults on the current field.
+- Recognize requests to use defaults for all remaining fields.
+- If a value is given but the key is implicit, infer from current question context.
+
+FRIENDLY RESPONSE STYLE:
+- Start with a brief acknowledgement.
+- Confirm what you understood.
+- If useful, include one concise real-world hint.
+- Keep it compact and clear.
+
+PARAMETER CATALOG:
 """
         + json.dumps({k: {**v, "default": DEFAULT_VALUES[k]} for k, v in PARAM_INFO.items()}, indent=2)
     )
@@ -409,10 +588,16 @@ def create_extraction_prompt(user_input: str, context: str, current_asking: Opti
 {f"Parameter: {current_asking} ({PARAM_INFO[current_asking]['name']})" if current_asking else "General conversation - extract any parameters mentioned"}
 
 ### TASK
-1. Determine if the user is providing a parameter value
-2. If yes, extract the value and unit (if mentioned)
-3. Check if they want to use default (words like "default", "skip", "use default", "that's fine", "ok")
-4. Generate a friendly response
+1. Decide user intent:
+    - provide one value,
+    - provide multiple values,
+    - use default for current field,
+    - use defaults for all remaining fields,
+    - ask a question / need clarification.
+2. Extract values and units if present.
+3. Map values to correct parameter keys.
+4. If uncertain, set needs_clarification=true.
+5. Write friendly_response as a natural beginner-friendly assistant.
 
 ### OUTPUT FORMAT (JSON only, no other text):
 {{
@@ -427,12 +612,10 @@ def create_extraction_prompt(user_input: str, context: str, current_asking: Opti
 }}
 
 IMPORTANT DETECTION RULES:
-- Single default: "default", "skip", "ok", "fine", "sure", "yes" = use_default: true (for current parameter only)
-- ALL defaults: "default for the rest", "use defaults for remaining", "skip all", "defaults for everything", "I don't know the rest", "that's all I have" = use_all_defaults: true
-- If user says they don't know remaining values or want to finish = use_all_defaults: true
-- Look for unit mentions: "meters", "m", "cm", "MPa", "kPa", "psi", "feet", "inches"
-- If user says "4 meters", extract 4 with unit "m" or "meters"
-- Be warm and encouraging!
+- Prioritize extracting multiple parameters from one user message when possible.
+- If a user message includes updates to existing values, use the newest values.
+- Never expose raw JSON, schema keys, or implementation details in friendly_response.
+- Be warm, concise, and proactive.
 
 JSON RESPONSE:"""
     return prompt
@@ -460,6 +643,37 @@ def process_user_input_with_llm(
 ) -> Dict[str, Any]:
     """Process user input through LLM for extraction and response generation."""
 
+    stripped_input = user_input.strip().lower()
+
+    if current_asking and stripped_input in SINGLE_DEFAULT_PATTERNS:
+        return {
+            "understood_value": None,
+            "use_default": True,
+            "use_all_defaults": False,
+            "needs_clarification": False,
+            "friendly_response": "Absolutely, we can use the suggested value for this one.",
+            "original_unit": None,
+            "parameter_key": current_asking,
+            "extracted_multiple": {},
+        }
+
+    heuristic_candidates = parse_multi_param_candidates(user_input)
+    if len(heuristic_candidates) >= 2:
+        extracted_multiple: Dict[str, float] = {}
+        for key, (value, _) in heuristic_candidates.items():
+            extracted_multiple[key] = value
+        return {
+            "understood_value": None,
+            "use_default": False,
+            "use_all_defaults": False,
+            "needs_clarification": False,
+            "friendly_response": "Great details, thanks. I captured multiple values together.",
+            "original_unit": None,
+            "parameter_key": current_asking,
+            "extracted_multiple": extracted_multiple,
+            "extracted_units": {k: u for k, (_, u) in heuristic_candidates.items() if u},
+        }
+
     if check_use_all_defaults_intent(user_input):
         return {
             "understood_value": None,
@@ -479,15 +693,18 @@ def process_user_input_with_llm(
         if response and response.content:
             content = response.content.strip()
 
-            if "```json" in content:
-                content = re.sub(r"```json\s*", "", content)
-                content = re.sub(r"```\s*", "", content)
-            elif "```" in content:
-                content = re.sub(r"```\s*", "", content)
+            if content.startswith("```"):
+                first_newline = content.find("\n")
+                if first_newline != -1:
+                    content = content[first_newline + 1 :]
+                if content.endswith("```"):
+                    content = content[:-3]
+                content = content.strip()
 
-            json_match = re.search(r"\{.*\}", content, re.DOTALL)
-            if json_match:
-                content = json_match.group()
+            start = content.find("{")
+            end = content.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                content = content[start : end + 1]
 
             try:
                 result = json.loads(content)
@@ -503,6 +720,22 @@ def process_user_input_with_llm(
 
                 return result
             except json.JSONDecodeError:
+                if current_asking:
+                    if current_asking in heuristic_candidates:
+                        num, unit = heuristic_candidates[current_asking]
+                    else:
+                        num, unit = _extract_first_number_with_unit(user_input)
+                    if num is not None and isinstance(num, (int, float)):
+                        return {
+                            "understood_value": num,
+                            "use_default": False,
+                            "use_all_defaults": False,
+                            "needs_clarification": False,
+                            "friendly_response": "Thanks, I captured that value.",
+                            "original_unit": unit,
+                            "parameter_key": current_asking,
+                            "extracted_multiple": {},
+                        }
                 return {
                     "understood_value": None,
                     "use_default": False,
@@ -544,6 +777,13 @@ We're going to configure a few settings for your concrete slab (the road surface
 **Ready to start?** Just tell me about your pavement, or type **\"let's begin\"** and I'll guide you step by step! 
 
 *Example: \"I have a 4 meter square slab\" or \"let's begin\"*
+
+---
+
+### 📊 Progress
+- Completed: **0/13 (0%)**
+- Remaining: **13**
+- Next focus: **Slab Length**
 """
 
 

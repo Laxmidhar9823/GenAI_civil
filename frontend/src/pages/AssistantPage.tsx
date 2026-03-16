@@ -3,7 +3,7 @@ import { Link, useSearchParams } from 'react-router-dom'
 import ChatPanel from '../components/ChatPanel'
 import OllamaSettings from '../components/OllamaSettings'
 import ParamsPanel from '../components/ParamsPanel'
-import { API_BASE_URL, apiChat, apiGetSchema, apiOllamaStatus, apiReset } from '../lib/api'
+import { API_BASE_URL, apiChat, apiGetSchema, apiHealth, apiOllamaStatus, apiReset } from '../lib/api'
 import type { ChatMessage, ConversationState, OllamaCheckState, SchemaResponse } from '../lib/types'
 import { computeProgress, extractCollectedParams, extractFinalParams, extractMessagesFromState, extractParamInfo } from '../lib/parsers'
 import MotionSection from '../components/MotionSection'
@@ -23,6 +23,8 @@ export default function AssistantPage() {
   const [finalParamsFromResponse, setFinalParamsFromResponse] = useState<Record<string, number> | null>(null)
   const [busy, setBusy] = useState(false)
   const [schemaBusy, setSchemaBusy] = useState(false)
+  const [healthBusy, setHealthBusy] = useState(false)
+  const [backendHealthy, setBackendHealthy] = useState<boolean | null>(null)
   const [ollamaUrl, setOllamaUrl] = useState(() => localStorage.getItem('ollamaUrl') || 'http://localhost:11434')
   const [model, setModel] = useState(() => localStorage.getItem('ollamaModel') || 'gemma3:12b')
   const [ollamaStatus, setOllamaStatus] = useState<OllamaCheckState>({ kind: 'unknown' })
@@ -34,7 +36,9 @@ export default function AssistantPage() {
   const progress = useMemo(() => computeProgress({ paramInfo, collected }), [paramInfo, collected])
 
   const schemaDot = schemaBusy ? 'check' : schema ? 'ok' : 'err'
-  const schemaLabel = schemaBusy ? 'Loading schema…' : schema ? 'Schema loaded' : 'Schema unavailable'
+  const schemaLabel = schemaBusy ? 'Loading schema...' : schema ? 'Schema loaded' : 'Schema unavailable'
+  const backendDot = healthBusy ? 'check' : backendHealthy ? 'ok' : backendHealthy === false ? 'err' : 'dot'
+  const backendLabel = healthBusy ? 'Checking backend...' : backendHealthy ? 'Backend connected' : backendHealthy === false ? 'Backend offline' : 'Backend unknown'
 
   const applyStateToMessages = useCallback((nextState: ConversationState) => {
     const fromState = extractMessagesFromState(nextState)
@@ -52,8 +56,24 @@ export default function AssistantPage() {
       setSchema(s)
     } catch (e) {
       setError((e as Error).message)
+      setSchema(null)
     } finally {
       setSchemaBusy(false)
+    }
+  }, [])
+
+  const checkBackendHealth = useCallback(async () => {
+    setHealthBusy(true)
+    try {
+      await apiHealth()
+      setBackendHealthy(true)
+      return true
+    } catch (e) {
+      setBackendHealthy(false)
+      setError((e as Error).message)
+      return false
+    } finally {
+      setHealthBusy(false)
     }
   }, [])
 
@@ -73,7 +93,7 @@ export default function AssistantPage() {
             role: 'assistant',
             content:
               resp.assistant_message ||
-              'Welcome! The backend did not return a message history in `/reset`. You can still chat, but consider returning `messages` in state.',
+              'Welcome. The backend did not return message history in /reset. You can continue chatting, but returning messages in state is recommended.',
           },
         ])
       }
@@ -84,30 +104,48 @@ export default function AssistantPage() {
     }
   }, [applyStateToMessages])
 
+  const reconnectBackend = useCallback(async () => {
+    setError(null)
+    const ok = await checkBackendHealth()
+    if (!ok) return
+    await Promise.all([loadSchema(), resetConversation()])
+  }, [checkBackendHealth, loadSchema, resetConversation])
+
   const checkOllama = useCallback(async () => {
     setOllamaStatus({ kind: 'checking' })
     try {
       const res = await apiOllamaStatus({ ollama_url: ollamaUrl, model })
+      const normalizedModel = model.trim()
+      const isCloudTag = normalizedModel.toLowerCase().endsWith(':cloud')
+
       if (!res.connected) {
         setOllamaStatus({
           kind: 'error',
-          detail: `Cannot reach Ollama at ${ollamaUrl}. Start Ollama with "ollama serve" and try again.`,
+          detail: res.detail || `Cannot reach Ollama at ${ollamaUrl}. Start Ollama with "ollama serve" and try again.`,
         })
         return
       }
 
       if (!res.model_available) {
         const available = res.available_models?.length ? ` Available: ${res.available_models.slice(0, 5).join(', ')}.` : ''
+        const suggestions = res.model_suggestions?.length ? ` Suggestions: ${res.model_suggestions.join(', ')}.` : ''
+        const installHint = isCloudTag
+          ? `Confirm the exact cloud tag and spelling, then run "ollama list".`
+          : `Run "ollama pull ${normalizedModel}" and retry.`
         setOllamaStatus({
           kind: 'needs_model',
-          model,
+          model: normalizedModel,
           availableModels: res.available_models ?? [],
-          detail: `Ollama is running, but model "${model}" is not installed. Run "ollama pull ${model}" and retry.${available}`,
+          suggestedModels: res.model_suggestions ?? [],
+          detail:
+            res.detail ||
+            `Ollama is running, but model "${normalizedModel}" is not installed. ${installHint}${available}${suggestions}`,
         })
         return
       }
 
-      setOllamaStatus({ kind: 'ok', detail: `Ollama is running and model "${model}" is available.` })
+      const matched = res.matched_model || normalizedModel
+      setOllamaStatus({ kind: 'ok', detail: `Ollama is running and model "${matched}" is available.` })
     } catch (e) {
       setOllamaStatus({ kind: 'error', detail: (e as Error).message })
     }
@@ -149,9 +187,8 @@ export default function AssistantPage() {
   )
 
   useEffect(() => {
-    void loadSchema()
-    void resetConversation()
-  }, [loadSchema, resetConversation])
+    void reconnectBackend()
+  }, [reconnectBackend])
 
   useEffect(() => {
     localStorage.setItem('ollamaUrl', ollamaUrl)
@@ -182,18 +219,35 @@ export default function AssistantPage() {
     <div className="page-stack">
       <MotionSection className="content-card app-header-card">
         <div>
-          <h1>Assistant Workspace</h1>
-          <p className="subtle-copy">Backend-driven guided flow with local model settings and exportable outputs.</p>
+          <p className="eyebrow">Assistant workspace</p>
+          <h1>Run guided pavement configuration sessions</h1>
+          <p className="subtle-copy">
+            The backend controls question sequencing and parameter state while this UI keeps progress, model status, and
+            exports in one focused layout.
+          </p>
         </div>
-        <button className="btn danger" type="button" onClick={() => void resetConversation()} disabled={busy}>
-          Reset Session
-        </button>
+        <div className="app-header-actions">
+          <span className="pill pill-soft" aria-label="Backend status">
+            <span className={`dot ${backendDot}`} aria-hidden="true" />
+            <span>{backendLabel}</span>
+          </span>
+          <span className="pill pill-soft" aria-label="Schema status">
+            <span className={`dot ${schemaDot}`} aria-hidden="true" />
+            <span>{schemaLabel}</span>
+          </span>
+          <button className="btn" type="button" onClick={() => void reconnectBackend()} disabled={busy || schemaBusy || healthBusy}>
+            Reconnect
+          </button>
+          <button className="btn danger" type="button" onClick={() => void resetConversation()} disabled={busy}>
+            Reset session
+          </button>
+        </div>
       </MotionSection>
 
       {error ? (
         <div className="banner" role="alert" aria-live="assertive">
           <strong>Error:</strong> {error}
-          <ul style={{ margin: '8px 0 0', paddingLeft: 18 }}>
+          <ul>
             <li>
               Start backend: <span className="kbd">uvicorn backend.main:app --reload --port 8000</span>
             </li>
@@ -201,8 +255,10 @@ export default function AssistantPage() {
               Confirm frontend API base URL env: <span className="kbd">VITE_API_BASE_URL</span>
             </li>
             <li>
-              Verify backend health:{' '}
-              <span className="kbd">curl {API_BASE_URL}/health</span>
+              Verify backend health: <span className="kbd">curl {API_BASE_URL}/health</span>
+            </li>
+            <li>
+              Try <span className="kbd">Reconnect</span> after backend starts.
             </li>
             <li>
               Need setup help? Open <Link to="/docs">Docs</Link>.
@@ -229,7 +285,7 @@ export default function AssistantPage() {
 
           <ParamsPanel progress={progress} paramInfo={paramInfo} collected={collected} finalParams={finalParams} />
 
-          <div className="card" aria-label="Notes">
+          <div className="card" aria-label="Workspace notes">
             <div className="card-header">
               <h2>Notes</h2>
               <span className="pill">
@@ -238,21 +294,20 @@ export default function AssistantPage() {
               </span>
             </div>
             <div className="card-body">
-              <div className="sub" style={{ lineHeight: 1.6 }}>
-                <p style={{ marginTop: 0 }}>
-                  This UI sends only your free-text responses. The backend controls the guided flow and returns the next
-                  question.
-                </p>
-                <ul style={{ margin: 0, paddingLeft: 18 }}>
-                  <li>
-                    API base is configured via <span className="kbd">VITE_API_BASE_URL</span>.
-                  </li>
-                  <li>Assistant messages support Markdown rendering.</li>
-                  <li>
-                    When the backend returns <span className="kbd">final_params</span>, downloads appear.
-                  </li>
-                </ul>
-              </div>
+              <p className="sub">
+                This interface sends free-text responses only. The backend determines the next question and returns state
+                updates after each message.
+              </p>
+              <ul className="notes-list">
+                <li>
+                  API base URL is configured via <span className="kbd">VITE_API_BASE_URL</span>.
+                </li>
+                <li>Assistant responses support Markdown rendering.</li>
+                <li>
+                  When backend returns <span className="kbd">final_params</span>, download actions appear in
+                  Configuration Status.
+                </li>
+              </ul>
             </div>
           </div>
         </MotionSection>

@@ -13,7 +13,6 @@ export default function ChatPanel(props: {
   const scrollerRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => {
-    // Keep the latest message in view.
     const el = scrollerRef.current
     if (!el) return
     el.scrollTop = el.scrollHeight
@@ -23,11 +22,11 @@ export default function ChatPanel(props: {
     <div className="card chat-card" aria-label="Chat">
       <div className="card-header">
         <div className="chat-title">
-          <div className={headerDotClass} />
-          <h2>Guided Assistant</h2>
+          <div className={headerDotClass} aria-hidden="true" />
+          <h2>Guided assistant</h2>
         </div>
         <div className="sub sub-sm">
-          <span className="kbd">Enter</span> to send
+          Press <span className="kbd">Enter</span> to send
         </div>
       </div>
 
@@ -38,7 +37,7 @@ export default function ChatPanel(props: {
             <p>
               Welcome to the Pavement Configurator.
               <br />
-              I’m ready to help you set up your project.
+              Share your first requirement to begin the guided flow.
             </p>
           </div>
         ) : (
@@ -57,7 +56,7 @@ export default function ChatPanel(props: {
           }}
           className="composer-form"
         >
-          <label className="label" htmlFor="userInput" style={{ position: 'absolute', left: '-9999px' }}>
+          <label className="sr-only" htmlFor="userInput">
             Your message
           </label>
           <input
@@ -65,7 +64,7 @@ export default function ChatPanel(props: {
             className="input composer-input"
             value={text}
             onChange={(e) => setText(e.target.value)}
-            placeholder={busy ? 'Thinking...' : 'Type your answer…'}
+            placeholder={busy ? 'Thinking...' : 'Type your answer...'}
             disabled={busy}
             autoComplete="off"
           />

@@ -12,16 +12,21 @@ export default function ExamplesPage() {
   return (
     <div className="page-stack">
       <MotionSection className="content-card">
-        <h1>Example prompts</h1>
-        <p className="subtle-copy">Jump directly into the assistant with a starter message.</p>
+        <h1>Prompt examples</h1>
+        <p className="subtle-copy">
+          Use these starters to jump directly into the assistant. You can edit each prompt after it is loaded.
+        </p>
       </MotionSection>
 
       <MotionSection className="example-grid">
-        {examples.map((prompt) => (
+        {examples.map((prompt, index) => (
           <article key={prompt} className="example-card interactive-lift">
-            <p>{prompt}</p>
+            <div>
+              <h3>Starter {index + 1}</h3>
+              <p>{prompt}</p>
+            </div>
             <Link className="btn" to={`/app?prompt=${encodeURIComponent(prompt)}`}>
-              Open in App
+              Open in Assistant
             </Link>
           </article>
         ))}

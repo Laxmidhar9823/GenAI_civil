@@ -14,7 +14,7 @@ function Navigation() {
         </div>
         <div>
           <strong>Pavement AI</strong>
-          <p>Premium configuration assistant</p>
+          <p>Local rigid pavement configuration assistant</p>
         </div>
       </div>
 
@@ -23,13 +23,13 @@ function Navigation() {
           Home
         </NavLink>
         <NavLink to="/app" className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}>
-          App
+          Assistant
         </NavLink>
         <NavLink to="/docs" className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}>
           Docs
         </NavLink>
         <NavLink to="/examples" className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}>
-          Examples
+          Prompts
         </NavLink>
       </nav>
     </header>

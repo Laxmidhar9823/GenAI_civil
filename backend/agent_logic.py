@@ -1,4 +1,5 @@
 import json
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from typing import Any, Dict, List, Optional, Tuple
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
@@ -189,6 +190,8 @@ PARAM_CATEGORIES = {
 }
 
 PARAM_ORDER = ["a", "b", "t", "Emod", "nu", "Kx", "Ky", "Kz", "x1", "x2", "y1", "y2", "q"]
+
+LLM_INVOKE_TIMEOUT_SECONDS = 8.0
 
 USE_ALL_DEFAULTS_PATTERNS = [
     "use defaults",
@@ -635,6 +638,18 @@ def build_llm_message_history(messages: List[Dict]) -> List:
     return lc_messages
 
 
+def _invoke_llm_with_timeout(llm: ChatOllama, messages: List, timeout_seconds: float = LLM_INVOKE_TIMEOUT_SECONDS):
+    executor = ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(llm.invoke, messages)
+    try:
+        return future.result(timeout=timeout_seconds)
+    except FuturesTimeoutError as exc:
+        future.cancel()
+        raise TimeoutError(f"LLM request timed out after {timeout_seconds:.1f}s") from exc
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
+
+
 def process_user_input_with_llm(
     user_input: str,
     llm: ChatOllama,
@@ -688,7 +703,7 @@ def process_user_input_with_llm(
         extraction_prompt = create_extraction_prompt(user_input, context, current_asking)
         human_message = HumanMessage(content=extraction_prompt)
 
-        response = llm.invoke([system_message, human_message])
+        response = _invoke_llm_with_timeout(llm, [system_message, human_message])
 
         if response and response.content:
             content = response.content.strip()
@@ -746,6 +761,11 @@ def process_user_input_with_llm(
 
         return {"needs_clarification": True, "friendly_response": "I didn't catch that. Could you please try again?"}
 
+    except TimeoutError:
+        return {
+            "needs_clarification": True,
+            "friendly_response": "The model is taking too long to respond right now. Please try again, use 'let's begin' for guided mode, or provide multiple numeric values in one message.",
+        }
     except Exception:
         return {
             "needs_clarification": True,

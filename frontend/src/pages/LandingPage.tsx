@@ -3,78 +3,62 @@ import MotionSection from '../components/MotionSection'
 
 const highlights = [
   {
-    title: 'Structured chat workflow',
-    description: 'The backend manages state and next-step prompts, so configuration stays deterministic and easy to audit.',
+    title: 'Deterministic Workflow',
+    description: 'The backend manages state and next-step prompts ensuring every configuration is auditable and precise.',
   },
   {
-    title: 'Local-first architecture',
-    description: 'Run backend and Ollama on your machine for private development workflows and repeatable results.',
+    title: 'Private & Local',
+    description: 'Run the entire stack on your machine. No data leaves your network.',
   },
   {
-    title: 'Production-ready output',
-    description: 'Track completion progress live and export final parameters when the session reaches a complete state.',
+    title: 'Live Tracking',
+    description: 'Watch your configuration evolve in real-time and export production-ready parameters instantly.',
   },
-]
-
-const quickFacts = [
-  'Designed for engineering-focused workflows',
-  'Responsive workspace optimized for long sessions',
-  'Markdown support for rich assistant responses',
 ]
 
 export default function LandingPage() {
   return (
-    <div className="page-stack">
-      <MotionSection className="hero-card">
-        <p className="eyebrow">Pavement AI Assistant</p>
-        <h1>Confident rigid pavement configuration, guided one prompt at a time.</h1>
-        <p className="hero-copy">
-          Build configurations with a clean local workspace that keeps technical context readable. Start with docs,
-          verify services, then run your conversation flow in the assistant.
-        </p>
-        <div className="hero-actions">
-          <Link to="/app" className="btn primary">
-            Open Assistant
-          </Link>
-          <Link to="/docs" className="btn">
-            Setup Guide
-          </Link>
-        </div>
-      </MotionSection>
+    <div className="landing-page">
+      <div className="page-stack">
+        <MotionSection className="hero-section">
+          <p className="eyebrow">Pavement AI Assistant</p>
+          <h1 className="hero-title">Rigid Pavement Configuration.<br/>Simplified.</h1>
+          <p className="hero-desc">
+            Experience a new standard in civil engineering workflows. 
+            Build complex configurations with a clean, intelligent assistant that guides you every step of the way.
+          </p>
+          <div className="hero-actions">
+            <Link to="/app" className="btn primary">
+              Launch Assistant
+            </Link>
+            <Link to="/docs" className="btn">
+              View Documentation
+            </Link>
+          </div>
+        </MotionSection>
 
-      <MotionSection className="hero-meta-grid">
-        {quickFacts.map((fact) => (
-          <article key={fact} className="feature-card interactive-lift">
-            <h3>Workspace detail</h3>
-            <p>{fact}</p>
-          </article>
-        ))}
-      </MotionSection>
+        <MotionSection className="feature-section">
+          {highlights.map((item) => (
+            <article key={item.title} className="feature-card">
+              <h3>{item.title}</h3>
+              <p>{item.description}</p>
+            </article>
+          ))}
+        </MotionSection>
 
-      <MotionSection className="content-card">
-        <h2>Get started in 3 quick steps</h2>
-        <ol>
-          <li>
-            Read <Link to="/docs">Docs</Link> and run install commands for backend and frontend.
-          </li>
-          <li>
-            Start services: <span className="kbd">uvicorn backend.main:app --reload --port 8000</span> and{' '}
-            <span className="kbd">ollama serve</span>.
-          </li>
-          <li>
-            Open <Link to="/app">Assistant</Link>, confirm Ollama status, and begin your configuration chat.
-          </li>
-        </ol>
-      </MotionSection>
-
-      <MotionSection className="feature-grid">
-        {highlights.map((item) => (
-          <article key={item.title} className="feature-card interactive-lift">
-            <h3>{item.title}</h3>
-            <p>{item.description}</p>
-          </article>
-        ))}
-      </MotionSection>
+        <MotionSection className="feature-card content-card">
+          <div style={{ maxWidth: '100%', textAlign: 'center' }}>
+            <h3>Get started in seconds</h3>
+            <p style={{ maxWidth: '600px', margin: '0 auto 24px' }}>
+              Setup is minimal. Just run the local servers and you're ready to go.
+            </p>
+            <div style={{ display: 'flex', gap: '12px', justifyContent: 'center', flexWrap: 'wrap' }}>
+              <span className="kbd">uvicorn backend.main:app</span>
+              <span className="kbd">ollama serve</span>
+            </div>
+          </div>
+        </MotionSection>
+      </div>
     </div>
   )
 }

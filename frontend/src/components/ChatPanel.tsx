@@ -8,7 +8,6 @@ export default function ChatPanel(props: {
   onSend: (text: string) => void
 }) {
   const { messages, busy, onSend } = props
-  const headerDotClass = busy ? 'dot check' : messages.length > 0 ? 'dot ok' : 'dot'
   const [text, setText] = useState('')
   const scrollerRef = useRef<HTMLDivElement | null>(null)
 
@@ -19,33 +18,27 @@ export default function ChatPanel(props: {
   }, [messages.length])
 
   return (
-    <div className="card chat-card" aria-label="Chat">
-      <div className="card-header">
-        <div className="chat-title">
-          <div className={headerDotClass} aria-hidden="true" />
-          <h2>Guided assistant</h2>
-        </div>
-        <div className="sub sub-sm">
-          Press <span className="kbd">Enter</span> to send
-        </div>
-      </div>
-
-      <div className="chat" ref={scrollerRef} role="log" aria-live="polite" aria-relevant="additions">
+    <div className="chat-main">
+      <div className="chat-messages" ref={scrollerRef} role="log" aria-live="polite" aria-relevant="additions">
         {messages.length === 0 ? (
-          <div className="empty-state">
-            <div className="empty-mark" aria-hidden="true" />
-            <p>
-              Welcome to the Pavement Configurator.
-              <br />
-              Share your first requirement to begin the guided flow.
-            </p>
+          <div style={{ 
+            height: '100%', 
+            display: 'flex', 
+            flexDirection: 'column', 
+            alignItems: 'center', 
+            justifyContent: 'center', 
+            opacity: 0.5,
+            textAlign: 'center'
+          }}>
+            <div style={{ fontSize: '48px', marginBottom: '16px' }}>💬</div>
+            <p>Ready to assist.</p>
           </div>
         ) : (
           messages.map((m) => <ChatMessageView key={m.id} msg={m} />)
         )}
       </div>
 
-      <div className="composer">
+      <div className="chat-input-area">
         <form
           onSubmit={(e) => {
             e.preventDefault()
@@ -54,22 +47,25 @@ export default function ChatPanel(props: {
             setText('')
             onSend(trimmed)
           }}
-          className="composer-form"
+          className="input-group"
         >
           <label className="sr-only" htmlFor="userInput">
             Your message
           </label>
           <input
             id="userInput"
-            className="input composer-input"
+            className="chat-input"
             value={text}
             onChange={(e) => setText(e.target.value)}
-            placeholder={busy ? 'Thinking...' : 'Type your answer...'}
+            placeholder={busy ? 'Processing...' : 'Ask about pavement configuration...'}
             disabled={busy}
             autoComplete="off"
           />
-          <button className="btn primary" type="submit" disabled={busy || !text.trim()}>
-            Send
+          <button className="send-btn" type="submit" disabled={busy || !text.trim()}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <line x1="22" y1="2" x2="11" y2="13"></line>
+              <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+            </svg>
           </button>
         </form>
       </div>

@@ -6,13 +6,19 @@ export default function ChatMessage({ msg }: { msg: ChatMessageT }) {
   const isUser = msg.role === 'user'
 
   return (
-    <article className={`msg ${isUser ? 'user' : 'assistant'}`} aria-label={isUser ? 'User message' : 'Assistant message'}>
-      <div className={`avatar ${isUser ? 'user' : 'assistant'}`} aria-hidden="true">
-        {isUser ? 'U' : 'AI'}
+    <article className={`message ${isUser ? 'user' : 'ai'}`}>
+      <div className="message-avatar" aria-hidden="true">
+        {isUser ? 'You' : 'AI'}
       </div>
 
-      <div className={`bubble ${isUser ? 'user' : 'assistant'}`}>
-        {isUser ? <div className="user-text">{msg.content}</div> : <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>}
+      <div className="message-bubble">
+        {isUser ? (
+          <div>{msg.content}</div>
+        ) : (
+          <div className="markdown-content">
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
+          </div>
+        )}
       </div>
     </article>
   )

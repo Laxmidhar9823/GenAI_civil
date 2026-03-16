@@ -12,24 +12,24 @@ function Navigation() {
         <div className="brand-mark" aria-hidden="true">
           P
         </div>
-        <div>
+        <div className="brand-info">
           <strong>Pavement AI</strong>
-          <p>Local rigid pavement configuration assistant</p>
+          <p>Local Configuration Assistant</p>
         </div>
       </div>
 
       <nav className="site-nav" aria-label="Primary">
         <NavLink to="/" end className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}>
-          Home
+          Overview
         </NavLink>
         <NavLink to="/app" className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}>
           Assistant
         </NavLink>
         <NavLink to="/docs" className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}>
-          Docs
+          Documentation
         </NavLink>
         <NavLink to="/examples" className={({ isActive }) => `nav-link ${isActive ? 'active' : ''}`}>
-          Prompts
+          Examples
         </NavLink>
       </nav>
     </header>
@@ -43,12 +43,12 @@ function RoutedContent() {
   return (
     <AnimatePresence mode="wait">
       <motion.main
-        key={location.pathname + location.search}
+        key={location.pathname}
         className="page-shell"
-        initial={reduced ? { opacity: 1 } : { opacity: 0, y: 14 }}
-        animate={reduced ? { opacity: 1 } : { opacity: 1, y: 0 }}
-        exit={reduced ? { opacity: 1 } : { opacity: 0, y: -10 }}
-        transition={reduced ? { duration: 0 } : { duration: 0.38, ease: [0.22, 1, 0.36, 1] }}
+        initial={reduced ? { opacity: 1 } : { opacity: 0, scale: 0.995 }}
+        animate={reduced ? { opacity: 1 } : { opacity: 1, scale: 1 }}
+        exit={reduced ? { opacity: 1 } : { opacity: 0, scale: 1.005 }}
+        transition={reduced ? { duration: 0 } : { duration: 0.4, ease: [0.19, 1, 0.22, 1] }}
       >
         <Routes location={location}>
           <Route path="/" element={<LandingPage />} />

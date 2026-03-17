@@ -1,0 +1,201 @@
+"nodes": {
+  "x": [0.0, 1500, 3500],
+  "y": [0.0, 1500, 3500]
+}
+
+•	Purpose: Defines the coordinates of nodes in the finite element mesh.
+•	x: Array of x-coordinates (in mm or consistent unit) along the horizontal axis.
+o	0.0, 1500, 3500 – Positions in the x-direction.
+•	y: Array of y-coordinates along the vertical axis.
+o	0.0, 1500, 3500 – Positions in the y-direction.
+•	Together, they form a grid of nodes:
+o	Total nodes = len(x) * len(y) = 3 * 3 = 9 nodes.
+o	Mesh will consist of rectangular elements between these nodes.
+
+
+Slab Properties
+json
+"slab": {
+  "Emod": 24000.0,
+  "nu": 0.3,
+  "t": 200.0 (these are by default values, can be changed with user input)
+}
+•	Emod: Elastic modulus (Young's modulus) of the slab material.
+o	Unit: MPa (or consistent with load/stress units).
+o	Value: 24000.0 – Typical for concrete.
+•	nu: Poisson's ratio.
+o	Value: 0.3 – Common for concrete.
+•	t: Thickness of the slab.
+o	Value: 200.0 mm 
+________________________________________
+🌍 Subgrade (Foundation) Properties
+json
+"subgrade": {
+  "Kx": 50,
+  "Ky": 50,
+  "Kz": 50
+}
+•	Purpose: Defines the stiffness of the foundation (soil/subgrade) supporting the slab.
+•	Kx: Spring stiffness in the x-direction (horizontal shear resistance).
+•	Ky: Spring stiffness in the y-direction (horizontal shear resistance).
+•	Kz: Vertical spring stiffness (Winkler foundation modulus).
+•	Units: Typically in N/mm³ or kN/m³ (force per area per displacement).
+•	These represent a Winkler-type foundation with independent springs in each direction.
+
+
+Loads
+json
+"loads": {
+  "x1": [10.0],
+  "x2": [3400.0],
+  "y1": [10.0],
+  "y2": [3400.0],
+  "q": [0.1]
+}
+•	Purpose: Defines a rectangular patch load on the slab.
+•	x1: Start x-coordinate of loaded region.
+•	x2: End x-coordinate of loaded region.
+•	y1: Start y-coordinate of loaded region.
+•	y2: End y-coordinate of loaded region.
+•	q: Magnitude of uniform pressure load over that rectangular area.
+o	Value: 0.1 MPa (or consistent unit).
+•	This defines a uniformly distributed load over a rectangular area from (10, 10) to (3400, 3400) in the x-y plane.
+
+
+
+Analysis of Load Location
+
+
+Given:
+•	Slab extent: From (0,0) to (3500, 3500) based on node coordinates
+•	Load region: From (10, 10) to (3400, 3400)
+ Position Relative to Edges:
+Edge	Location	Distance from load to edge
+Left edge (x = 0)	Load starts at x = 10	10 units from edge
+Bottom edge (y = 0)	Load starts at y = 10	10 units from edge
+Right edge (x = 3500)	Load ends at x = 3400	100 units from edge
+Top edge (y = 3500)	Load ends at y = 3400	100 units from edge
+
+Edge Loading Conditions
+A load is considered ON AN EDGE when it touches or is very close to one of the four boundaries:
+Bottom Edge (y = 0)
+json
+// Example: Load touching bottom edge
+"x1": [500], "x2": [1500],
+"y1": [0], "y2": [1000]    // y1 = 0 means touching bottom edge
+Top Edge (y = max_y)
+Example: Load touching top edge (if max_y = 3500)
+"x1": [500], "x2": [1500],
+"y1": [2500], "y2": [3500]  // y2 = 3500 means touching top edge
+Left Edge (x = 0)
+Example: Load touching left edge
+"x1": [0], "x2": [1000],    // x1 = 0 means touching left edge
+"y1": [500], "y2": [1500]
+Right Edge (x = max_x)
+Example: Load touching right edge (if max_x = 3500)
+"x1": [2500], "x2": [3500],  // x2 = 3500 means touching right edge
+"y1": [500], "y2": [1500]
+
+
+Corner Loading Conditions
+A load is considered ON A CORNER when it touches TWO edges simultaneously:
+Bottom-Left Corner (x=0, y=0)
+json
+"x1": [0], "x2": [1000],     // Touches left edge
+"y1": [0], "y2": [1000]      // Touches bottom edge
+Bottom-Right Corner (x=max_x, y=0)
+json
+"x1": [2500], "x2": [3500],  // Touches right edge
+"y1": [0], "y2": [1000]      // Touches bottom edge
+Top-Left Corner (x=0, y=max_y)
+json
+"x1": [0], "x2": [1000],     // Touches left edge
+"y1": [2500], "y2": [3500]   // Touches top edge
+Top-Right Corner (x=max_x, y=max_y)
+json
+"x1": [2500], "x2": [3500],  // Touches right edge
+"y1": [2500], "y2": [3500]   // Touches top edge
+1.	Touching = On Edge/Corner: If any part of the load reaches the boundary (x=0, x=max, y=0, or y=max), it's on that edge/corner
+2.	Interior: Load is completely away from all boundaries (like original example)
+3.	Near Edge: Within ~10% of span from boundary, but not touching (often treated as edge loading in practice)
+
+ Mesh Density Classification
+
+
+slab of size 3500 × 3500 units:
+json
+"nodes": {
+  "x": [0.0, 1500, 3500],  // 2 elements in x-direction
+  "y": [0.0, 1500, 3500]   // 2 elements in y-direction
+}
+Total elements = (3-1) × (3-1) = 2 × 2 = 4 elements
+Classification:
+•	Coarse Mesh: ≤ 4 × 4 elements (like current setup)
+•	Medium Mesh: 8 × 8 to 15 × 15 elements ( better to create 15 × 15 mesh)
+•	Fine Mesh: ≥ 30 × 30 elements
+•	Example 1: Bottom-Left Corner Load
+•	"loads": {
+•	    "x1": [0.0],
+•	    "x2": [500.0],
+•	    "y1": [0.0],
+•	    "y2": [500.0],
+•	    "q": [0.15]
+•	  }
+•	Example 2: Bottom-Right Corner Load
+•	"loads": {
+•	    "x1": [3000.0],
+•	    "x2": [3500.0],
+•	    "y1": [0.0],
+•	    "y2": [500.0],
+•	    "q": [0.15]
+•	  }
+•	Example 3: Top-Left Corner Load
+•	"loads": {
+•	    "x1": [0.0],
+•	    "x2": [500.0],
+•	    "y1": [3000.0],
+•	    "y2": [3500.0],
+•	    "q": [0.15]
+•	  }
+•	Example 4: Top-Right Corner Load
+•	"loads": {
+•	    "x1": [3000.0],
+•	    "x2": [3500.0],
+•	    "y1": [3000.0],
+•	    "y2": [3500.0],
+•	    "q": [0.15]
+•	  }
+•	Example 5: Multiple Corner Loads (Dual Wheel)
+•	"loads": {
+•	    "x1": [0.0, 0.0],
+•	    "x2": [250.0, 250.0],
+•	    "y1": [0.0, 3250.0],
+•	    "y2": [250.0, 3500.0],
+•	    "q": [0.2, 0.2]
+•	  }
+•	 Example 6: Heavy Corner Load with Fine Mesh
+•	json
+•	{
+  "nodes": {
+    "x": [0, 200, 400, 600, 800, 1000, 1200, 1400, 1600, 1800, 2000, 2200, 2400, 2600, 2800, 3000, 3200, 3400, 3500],
+    "y": [0, 200, 400, 600, 800, 1000, 1200, 1400, 1600, 1800, 2000, 2200, 2400, 2600, 2800, 3000, 3200, 3400, 3500]
+  },
+  "slab": {
+    "Emod": 28000.0,
+    "nu": 0.2,
+    "t": 250.0
+  },
+  "subgrade": {
+    "Kx": 60,
+    "Ky": 60,
+    "Kz": 80
+  },
+  "loads": {
+    "x1": [3300.0],
+    "x2": [3500.0],
+    "y1": [3300.0],
+    "y2": [3500.0],
+    "q": [0.25]
+  }
+}
+

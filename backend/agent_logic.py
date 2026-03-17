@@ -1,4 +1,6 @@
 import json
+import math
+import re
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -19,6 +21,8 @@ DEFAULT_VALUES = {
     "y1": 200.0,
     "y2": 2000.0,
     "q": 0.1,
+    "mesh_type": "coarse",
+    "load_location": "interior",
 }
 
 NODE_DEFAULT_VALUES = {
@@ -197,6 +201,26 @@ PARAM_INFO = {
         "example": "Typically y1 + tire width (about 200-300 mm)",
         "icon": "🚗",
     },
+    "mesh_type": {
+        "name": "Mesh Density",
+        "technical_name": "Finite Element Mesh Classification",
+        "unit": "(no unit)",
+        "category": "Mesh / Nodes",
+        "simple_explanation": "Choose how dense the solver grid should be: coarse, medium, or fine.",
+        "typical_range": "coarse / medium / fine",
+        "example": "medium",
+        "icon": "🕸️",
+    },
+    "load_location": {
+        "name": "Load Location Type",
+        "technical_name": "Load Placement Class",
+        "unit": "(no unit)",
+        "category": "Load Position",
+        "simple_explanation": "Choose where the load acts on the slab: at corner, at edge, or interior.",
+        "typical_range": "corner / edge / interior",
+        "example": "corner",
+        "icon": "📍",
+    },
     "q": {
         "name": "Tire Pressure on Ground",
         "technical_name": "Tyre Contact Pressure",
@@ -214,6 +238,14 @@ PARAM_INFO = {
 PARAM_INFO.update(NODE_PARAM_INFO)
 
 NODE_PARAM_KEYS = {"x", "y"}
+MESH_TYPE_KEY = "mesh_type"
+LOAD_LOCATION_KEY = "load_location"
+
+MESH_LEVEL_ELEMENTS = {
+    "coarse": 2,
+    "medium": 15,
+    "fine": 30,
+}
 
 
 def get_default_value(key: str) -> Any:
@@ -222,15 +254,15 @@ def get_default_value(key: str) -> Any:
     return DEFAULT_VALUES[key]
 
 PARAM_CATEGORIES = {
-    "Mesh / Nodes": ["x", "y"],
+    "Mesh / Nodes": ["mesh_type", "x", "y"],
     "Slab Size": ["a", "b", "t"],
     "Material Properties": ["Emod", "nu"],
     "Ground Support": ["Kx", "Ky", "Kz"],
-    "Load Position": ["x1", "x2", "y1", "y2"],
+    "Load Position": ["load_location", "x1", "x2", "y1", "y2"],
     "Load": ["q"],
 }
 
-PARAM_ORDER = ["a", "b", "x", "y", "t", "Emod", "nu", "Kx", "Ky", "Kz", "x1", "x2", "y1", "y2", "q"]
+PARAM_ORDER = ["a", "b", "mesh_type", "t", "Emod", "nu", "Kx", "Ky", "Kz", "load_location", "q"]
 
 LLM_INVOKE_TIMEOUT_SECONDS = 8.0
 
@@ -253,7 +285,6 @@ SINGLE_DEFAULT_PATTERNS = {
     "default",
     "skip",
     "use default",
-    "fine",
     "ok",
     "okay",
     "yes",
@@ -261,14 +292,14 @@ SINGLE_DEFAULT_PATTERNS = {
 }
 
 PARAM_ALIASES = {
-    "a": ["a", "length", "slab length", "x length", "x dimension"],
-    "b": ["b", "width", "slab width", "y length", "y dimension"],
+    "a": ["a", "length", "slab length", "x length", "x dimension", "slab dimensions", "slab size"],
+    "b": ["b", "width", "slab width", "y length", "y dimension", "slab dimensions", "slab size"],
     "t": ["t", "thickness", "slab thickness", "depth"],
-    "Emod": ["emod", "modulus", "modulus of elasticity", "elasticity"],
+    "Emod": ["emod", "modulus", "modulus of elasticity", "elasticity", "concrete grade", "compressive strength"],
     "nu": ["nu", "poisson", "poissons ratio", "poisson ratio"],
-    "Kx": ["kx", "stiffness x", "foundation x"],
-    "Ky": ["ky", "stiffness y", "foundation y"],
-    "Kz": ["kz", "stiffness z", "foundation z"],
+    "Kx": ["kx", "stiffness x", "foundation x", "subgrade modulus", "foundation modulus"],
+    "Ky": ["ky", "stiffness y", "foundation y", "subgrade modulus", "foundation modulus"],
+    "Kz": ["kz", "stiffness z", "foundation z", "subgrade modulus", "foundation modulus"],
     "x1": ["x1", "load start x", "start x"],
     "x2": ["x2", "load end x", "end x"],
     "y1": ["y1", "load start y", "start y"],
@@ -277,6 +308,159 @@ PARAM_ALIASES = {
     "x": ["node x", "x nodes", "x coordinates", "mesh x", "grid x"],
     "y": ["node y", "y nodes", "y coordinates", "mesh y", "grid y"],
 }
+
+
+def normalize_mesh_type(value: Any) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    text = value.strip().lower()
+    if text in {"1", "coarse", "coarser", "low", "low mesh", "low density"}:
+        return "coarse"
+    if text in {"2", "medium", "med", "mid", "moderate"}:
+        return "medium"
+    if text in {"3", "fine", "finer", "high", "high mesh", "high density"}:
+        return "fine"
+    return None
+
+
+def normalize_load_location(value: Any) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    text = value.strip().lower()
+    if text in {"1", "corner", "at corner", "on corner", "corner load"}:
+        return "corner"
+    if text in {"2", "edge", "at edge", "on edge", "edge load", "near edge"}:
+        return "edge"
+    if text in {"3", "interior", "inside", "middle", "center", "centre", "at interior"}:
+        return "interior"
+    return None
+
+
+def infer_semantic_choices(user_input: str, current_asking: Optional[str] = None) -> Dict[str, str]:
+    lowered = user_input.lower()
+    extracted: Dict[str, str] = {}
+
+    mesh = normalize_mesh_type(user_input)
+    if mesh:
+        extracted[MESH_TYPE_KEY] = mesh
+    elif any(word in lowered for word in ["coarse", "medium", "fine"]):
+        if "coarse" in lowered:
+            extracted[MESH_TYPE_KEY] = "coarse"
+        elif "medium" in lowered:
+            extracted[MESH_TYPE_KEY] = "medium"
+        elif "fine" in lowered:
+            extracted[MESH_TYPE_KEY] = "fine"
+
+    load_loc = normalize_load_location(user_input)
+    if load_loc:
+        extracted[LOAD_LOCATION_KEY] = load_loc
+    elif "corner" in lowered:
+        extracted[LOAD_LOCATION_KEY] = "corner"
+    elif "edge" in lowered:
+        extracted[LOAD_LOCATION_KEY] = "edge"
+    elif any(word in lowered for word in ["interior", "inside", "middle", "center", "centre"]):
+        extracted[LOAD_LOCATION_KEY] = "interior"
+
+    if current_asking == MESH_TYPE_KEY and MESH_TYPE_KEY not in extracted:
+        keyed = normalize_mesh_type(user_input)
+        if keyed:
+            extracted[MESH_TYPE_KEY] = keyed
+    if current_asking == LOAD_LOCATION_KEY and LOAD_LOCATION_KEY not in extracted:
+        keyed = normalize_load_location(user_input)
+        if keyed:
+            extracted[LOAD_LOCATION_KEY] = keyed
+
+    return extracted
+
+
+def _linspace_nodes(span_mm: float, elements: int) -> List[float]:
+    if elements <= 0:
+        return [0.0, float(span_mm)]
+    values = [round((float(span_mm) * i) / elements, 3) for i in range(elements + 1)]
+    values[0] = 0.0
+    values[-1] = float(span_mm)
+    return values
+
+
+def infer_nodes_from_mesh(mesh_type: str, a: float, b: float) -> Tuple[List[float], List[float]]:
+    level = normalize_mesh_type(mesh_type) or "coarse"
+    elements = MESH_LEVEL_ELEMENTS[level]
+    return _linspace_nodes(a, elements), _linspace_nodes(b, elements)
+
+
+def infer_load_patch_from_location(load_location: str, a: float, b: float) -> Dict[str, float]:
+    location = normalize_load_location(load_location) or "interior"
+    slab_a = float(a)
+    slab_b = float(b)
+
+    patch_x = max(250.0, min(1000.0, round(0.2 * slab_a, 3)))
+    patch_y = max(250.0, min(1000.0, round(0.2 * slab_b, 3)))
+
+    if location == "corner":
+        return {
+            "x1": 0.0,
+            "x2": min(patch_x, slab_a),
+            "y1": 0.0,
+            "y2": min(patch_y, slab_b),
+        }
+
+    if location == "edge":
+        x1 = max(0.0, round((slab_a - patch_x) / 2.0, 3))
+        x2 = min(slab_a, round(x1 + patch_x, 3))
+        return {
+            "x1": x1,
+            "x2": x2,
+            "y1": 0.0,
+            "y2": min(patch_y, slab_b),
+        }
+
+    start_x = min(10.0, max(1.0, round(0.02 * slab_a, 3)))
+    start_y = min(10.0, max(1.0, round(0.02 * slab_b, 3)))
+    end_margin_x = min(100.0, max(start_x + 1.0, round(0.1 * slab_a, 3)))
+    end_margin_y = min(100.0, max(start_y + 1.0, round(0.1 * slab_b, 3)))
+    x2 = max(start_x + 1.0, round(slab_a - end_margin_x, 3))
+    y2 = max(start_y + 1.0, round(slab_b - end_margin_y, 3))
+
+    return {
+        "x1": round(start_x, 3),
+        "x2": min(slab_a, x2),
+        "y1": round(start_y, 3),
+        "y2": min(slab_b, y2),
+    }
+
+
+def apply_implicit_inferences(params: Dict[str, Any], user_provided_keys: List[str]) -> Tuple[List[str], List[str]]:
+    applied: List[str] = []
+    notes: List[str] = []
+    slab_a = float(params.get("a", DEFAULT_VALUES["a"]))
+    slab_b = float(params.get("b", DEFAULT_VALUES["b"]))
+
+    if MESH_TYPE_KEY in params and not any(k in user_provided_keys for k in NODE_PARAM_KEYS):
+        mesh_type = normalize_mesh_type(params[MESH_TYPE_KEY]) or "coarse"
+        inferred_x, inferred_y = infer_nodes_from_mesh(mesh_type, slab_a, slab_b)
+        if params.get("x") != inferred_x:
+            params["x"] = inferred_x
+            applied.append("x")
+        if params.get("y") != inferred_y:
+            params["y"] = inferred_y
+            applied.append("y")
+        if "x" in applied or "y" in applied:
+            notes.append(f"Inferred node coordinates from mesh type '{mesh_type}'.")
+
+    load_keys = ["x1", "x2", "y1", "y2"]
+    if LOAD_LOCATION_KEY in params and not any(k in user_provided_keys for k in load_keys):
+        location = normalize_load_location(params[LOAD_LOCATION_KEY]) or "interior"
+        inferred_load = infer_load_patch_from_location(location, slab_a, slab_b)
+        changed = False
+        for key, value in inferred_load.items():
+            if params.get(key) != value:
+                params[key] = value
+                applied.append(key)
+                changed = True
+        if changed:
+            notes.append(f"Inferred load patch coordinates for '{location}' location.")
+
+    return applied, notes
 
 
 def check_use_all_defaults_intent(user_input: str) -> bool:
@@ -339,6 +523,18 @@ def validate_single_param(key: str, value: Any, all_params: Dict[str, Any]) -> T
             return False, f"Last Y node cannot exceed slab width ({all_params['b']} mm)."
         return True, ""
 
+    if key == MESH_TYPE_KEY:
+        normalized = normalize_mesh_type(value)
+        if normalized is None:
+            return False, "Choose one mesh type: coarse, medium, or fine."
+        return True, ""
+
+    if key == LOAD_LOCATION_KEY:
+        normalized = normalize_load_location(value)
+        if normalized is None:
+            return False, "Choose one load location type: corner, edge, or interior."
+        return True, ""
+
     if not isinstance(value, (int, float)):
         return False, "Please provide a numeric value."
 
@@ -367,7 +563,12 @@ def validate_single_param(key: str, value: Any, all_params: Dict[str, Any]) -> T
 
 def find_first_inconsistent_param(params: Dict[str, Any]) -> Optional[Tuple[str, str]]:
     """Return (param_key, error_msg) for the first parameter that becomes invalid given current state."""
-    for key in PARAM_ORDER:
+    keys_to_check = list(PARAM_ORDER)
+    for extra_key in ["x", "y", "x1", "x2", "y1", "y2"]:
+        if extra_key in params and extra_key not in keys_to_check:
+            keys_to_check.append(extra_key)
+
+    for key in keys_to_check:
         if key in params:
             ok, msg = validate_single_param(key, params[key], params)
             if not ok:
@@ -377,6 +578,27 @@ def find_first_inconsistent_param(params: Dict[str, Any]) -> Optional[Tuple[str,
 
 def get_friendly_param_question(key: str, params: Dict[str, Any]) -> str:
     info = PARAM_INFO[key]
+
+    if key == MESH_TYPE_KEY:
+        return (
+            "🕸️ **Mesh Density**\n\n"
+            "Choose the solver mesh level. I'll infer node coordinates automatically.\n\n"
+            "1. coarse\n"
+            "2. medium\n"
+            "3. fine\n\n"
+            "Reply with the name or number (for example: 'medium' or '2')."
+        )
+
+    if key == LOAD_LOCATION_KEY:
+        return (
+            "📍 **Load Location Type**\n\n"
+            "Choose where the load is applied. I'll infer x1, x2, y1, y2 automatically.\n\n"
+            "1. corner\n"
+            "2. edge\n"
+            "3. interior\n\n"
+            "Reply with the name or number (for example: 'corner' or '1')."
+        )
+
     question = f"{info['icon']} **{info['name']}** ({info['technical_name']})\n\n"
     question += f"📝 *What this means:* {info['simple_explanation']}\n\n"
     question += f"📏 *Typical range:* {info['typical_range']}\n\n"
@@ -516,6 +738,133 @@ def _find_phrase_indices(tokens: List[str], phrase_tokens: List[str]) -> List[in
     return indices
 
 
+def _length_to_mm(value: float, unit: Optional[str]) -> float:
+    if unit is None:
+        return float(value)
+    unit_lower = unit.strip().lower()
+    multipliers = {
+        "mm": 1.0,
+        "millimeter": 1.0,
+        "millimeters": 1.0,
+        "cm": 10.0,
+        "m": 1000.0,
+        "meter": 1000.0,
+        "meters": 1000.0,
+    }
+    return float(value) * multipliers.get(unit_lower, 1.0)
+
+
+def _extract_engineering_candidates(text: str) -> Tuple[Dict[str, Any], Dict[str, str]]:
+    lowered = text.lower().replace("\n", " ")
+    out: Dict[str, Any] = {}
+    units: Dict[str, str] = {}
+
+    # Capture slab dimensions like "5m x 5m" and prefer lines that mention slab/dimensions.
+    dim_patterns = [
+        r"(?:slab\s*(?:dimensions?|size)?|dimensions?)\s*[:=-]?\s*(\d+(?:\.\d+)?)\s*(mm|cm|m|meter|meters)?\s*[x×]\s*(\d+(?:\.\d+)?)\s*(mm|cm|m|meter|meters)?",
+        r"\b(\d+(?:\.\d+)?)\s*(mm|cm|m|meter|meters)\s*[x×]\s*(\d+(?:\.\d+)?)\s*(mm|cm|m|meter|meters)\b",
+    ]
+    for pattern in dim_patterns:
+        dim_match = re.search(pattern, lowered)
+        if dim_match:
+            a_val = _length_to_mm(float(dim_match.group(1)), dim_match.group(2))
+            b_val = _length_to_mm(float(dim_match.group(3)), dim_match.group(4))
+            out["a"] = round(a_val, 3)
+            out["b"] = round(b_val, 3)
+            break
+
+    thickness_match = re.search(
+        r"(?:slab\s*)?thickness\s*[:=-]?\s*(\d+(?:\.\d+)?)\s*(mm|cm|m|meter|meters)?",
+        lowered,
+    )
+    if thickness_match:
+        out["t"] = round(_length_to_mm(float(thickness_match.group(1)), thickness_match.group(2)), 3)
+
+    grade_match = re.search(
+        r"(?:concrete\s*(?:grade|compressive\s*strength)?|grade|fck)\s*[:=-]?\s*(?:m|c)?\s*(\d+(?:\.\d+)?)",
+        lowered,
+    )
+    if grade_match:
+        fck = float(grade_match.group(1))
+        # Standard pavement approximation used in examples: Emod = 5000 * sqrt(fck).
+        out["Emod"] = round(5000.0 * math.sqrt(fck), 3)
+
+    # Capture subgrade/foundation modulus and apply in all directions by default.
+    k_match = re.search(
+        r"(?:subgrade|foundation|\bk\b)\s*(?:modulus)?\s*[:=-]?\s*(\d+(?:\.\d+)?)\s*(?:mpa\s*/\s*m|mpa/m)?",
+        lowered,
+    )
+    if k_match:
+        k_val = float(k_match.group(1))
+        if "kz only" in lowered or "only kz" in lowered:
+            out["Kz"] = k_val
+            if "kx=ky=0" in lowered or "assume kx=ky=0" in lowered:
+                out["Kx"] = 0.0
+                out["Ky"] = 0.0
+        else:
+            out["Kx"] = k_val
+            out["Ky"] = k_val
+            out["Kz"] = k_val
+
+    for key in ["Kx", "Ky", "Kz"]:
+        direct_match = re.search(rf"\b{key.lower()}\b\s*[:=-]?\s*(\d+(?:\.\d+)?)", lowered)
+        if direct_match:
+            out[key] = float(direct_match.group(1))
+
+    load_match = re.search(r"(?:wheel\s*)?load\s*[^\d]{0,20}(\d+(?:\.\d+)?)\s*(kn|n)", lowered)
+    area_match = re.search(
+        r"(?:load\s*)?(?:tire|tyre)?\s*contact\s*area\s*[:=-]?\s*(\d+(?:\.\d+)?)\s*(mm|cm|m|meter|meters)?\s*[x×]\s*(\d+(?:\.\d+)?)\s*(mm|cm|m|meter|meters)?",
+        lowered,
+    )
+
+    area_lx_mm: Optional[float] = None
+    area_ly_mm: Optional[float] = None
+    if area_match:
+        area_lx_mm = _length_to_mm(float(area_match.group(1)), area_match.group(2))
+        area_ly_mm = _length_to_mm(float(area_match.group(3)), area_match.group(4))
+
+    inferred_location = infer_semantic_choices(text).get(LOAD_LOCATION_KEY)
+    slab_a = float(out["a"]) if "a" in out else None
+    slab_b = float(out["b"]) if "b" in out else None
+
+    if inferred_location and area_lx_mm is not None and area_ly_mm is not None:
+        lx = float(area_lx_mm)
+        ly = float(area_ly_mm)
+        if inferred_location == "corner":
+            out["x1"] = 0.0
+            out["x2"] = min(lx, slab_a) if slab_a is not None else lx
+            out["y1"] = 0.0
+            out["y2"] = min(ly, slab_b) if slab_b is not None else ly
+        elif inferred_location == "edge" and slab_a is not None:
+            x1 = max(0.0, (slab_a - lx) / 2.0)
+            out["x1"] = round(x1, 3)
+            out["x2"] = round(min(slab_a, x1 + lx), 3)
+            out["y1"] = 0.0
+            out["y2"] = round(min(ly, slab_b), 3) if slab_b is not None else round(ly, 3)
+        elif inferred_location == "interior" and slab_a is not None and slab_b is not None:
+            x1 = max(0.0, (slab_a - lx) / 2.0)
+            y1 = max(0.0, (slab_b - ly) / 2.0)
+            out["x1"] = round(x1, 3)
+            out["x2"] = round(min(slab_a, x1 + lx), 3)
+            out["y1"] = round(y1, 3)
+            out["y2"] = round(min(slab_b, y1 + ly), 3)
+
+    explicit_q = re.search(r"(?:pressure|\bq\b)\s*[:=-]?\s*(\d+(?:\.\d+)?)\s*(mpa|kpa|psi)?", lowered)
+    if explicit_q:
+        out["q"] = float(explicit_q.group(1))
+        if explicit_q.group(2):
+            units["q"] = explicit_q.group(2)
+    elif load_match and area_lx_mm is not None and area_ly_mm is not None:
+        load_value = float(load_match.group(1))
+        load_unit = (load_match.group(2) or "n").lower()
+        load_n = load_value * 1000.0 if load_unit == "kn" else load_value
+
+        area_mm2 = max(area_lx_mm * area_ly_mm, 1e-9)
+        out["q"] = round(load_n / area_mm2, 5)
+
+    return out, units
+
+
 def parse_multi_param_candidates(text: str) -> Dict[str, Tuple[float, Optional[str]]]:
     tokens = _tokenize_for_numbers(text)
     if not tokens:
@@ -625,7 +974,7 @@ def generate_interactive_followup(params: Dict[str, Any]) -> str:
     lines.extend(
         [
             "",
-            "Tip: You can reply like \"length 4.5 m, width 3.5 m, thickness 220 mm\".",
+            "Tip: You can reply like \"length 4.5 m, width 3.5 m, mesh medium, load at edge\".",
             "If you'd like, say \"use defaults for remaining\" and I'll finish the rest safely.",
         ]
     )
@@ -682,10 +1031,13 @@ def create_extraction_prompt(user_input: str, context: str, current_asking: Opti
 {context}
 
 ### NODE CONTEXT
-- Ask the user for node X and Y coordinates like other parameters.
-- If user does not provide them, use defaults safely.
-- Node X defaults: {NODE_DEFAULT_VALUES['x']}
-- Node Y defaults: {NODE_DEFAULT_VALUES['y']}
+- Node coordinates are inferred from mesh_type:
+    - coarse -> 2x2 elements (3 nodes each direction)
+    - medium -> 15x15 elements
+    - fine -> 30x30 elements
+- Load coordinates are inferred from load_location:
+    - corner, edge, interior
+- Extract mesh_type/load_location when user mentions these classes.
 
 ### USER INPUT
 "{user_input}"
@@ -707,7 +1059,7 @@ def create_extraction_prompt(user_input: str, context: str, current_asking: Opti
 
 ### OUTPUT FORMAT (JSON only, no other text):
 {{
-    "understood_value": <number or null if not providing a value>,
+    "understood_value": <number|string or null if not providing a value>,
     "original_unit": "<unit mentioned by user or null>",
     "parameter_key": "<which parameter this is for>",
     "use_default": <true/false - if user wants default for CURRENT parameter>,
@@ -720,6 +1072,8 @@ def create_extraction_prompt(user_input: str, context: str, current_asking: Opti
 IMPORTANT DETECTION RULES:
 - Prioritize extracting multiple parameters from one user message when possible.
 - If a user message includes updates to existing values, use the newest values.
+- Detect mesh_type from: coarse / medium / fine (or 1/2/3).
+- Detect load_location from: corner / edge / interior (or 1/2/3).
 - Never expose raw JSON, schema keys, or implementation details in friendly_response.
 - Be warm, concise, and proactive.
 
@@ -775,24 +1129,42 @@ def process_user_input_with_llm(
             "extracted_multiple": {},
         }
 
+    semantic_choices = infer_semantic_choices(user_input, current_asking)
     heuristic_candidates = parse_multi_param_candidates(user_input)
     node_list_candidates = _parse_node_list_candidates(user_input)
-    if len(heuristic_candidates) >= 2 or node_list_candidates:
-        extracted_multiple: Dict[str, Any] = {}
-        for key, (value, _) in heuristic_candidates.items():
+    engineering_candidates, engineering_units = _extract_engineering_candidates(user_input)
+
+    extracted_multiple: Dict[str, Any] = {}
+    extracted_units: Dict[str, str] = {}
+
+    if semantic_choices:
+        extracted_multiple.update(semantic_choices)
+    if engineering_candidates:
+        extracted_multiple.update(engineering_candidates)
+    for key, (value, unit) in heuristic_candidates.items():
+        # Prefer deterministic engineering parsing for domain-specific fields when present.
+        if key not in extracted_multiple:
             extracted_multiple[key] = value
-        for key, values in node_list_candidates.items():
-            extracted_multiple[key] = values
+        if unit:
+            extracted_units[key] = unit
+    for key, values in node_list_candidates.items():
+        extracted_multiple[key] = values
+    extracted_units.update(engineering_units)
+
+    if extracted_multiple:
+        friendly = "Great details, thanks. I captured multiple values together."
+        if semantic_choices and len(extracted_multiple) == len(semantic_choices):
+            friendly = "Perfect, I captured that classification and will infer the detailed coordinates automatically."
         return {
             "understood_value": None,
             "use_default": False,
             "use_all_defaults": False,
             "needs_clarification": False,
-            "friendly_response": "Great details, thanks. I captured multiple values together.",
+            "friendly_response": friendly,
             "original_unit": None,
             "parameter_key": current_asking,
             "extracted_multiple": extracted_multiple,
-            "extracted_units": {k: u for k, (_, u) in heuristic_candidates.items() if u},
+            "extracted_units": extracted_units,
         }
 
     if check_use_all_defaults_intent(user_input):
@@ -888,9 +1260,10 @@ I'm here to help you set up parameters for analyzing a concrete road pavement. D
 ### 🎯 What we're doing:
 We're going to configure a few settings for your concrete slab (the road surface). I'll ask you about:
 - **The size of the slab** (how big it is)
+- **The mesh density** (coarse / medium / fine)
 - **The concrete properties** (how strong it is)  
 - **The ground underneath** (how supportive the soil is)
-- **Where the vehicle load is** (where tires press on the road)
+- **Where the load acts** (corner / edge / interior)
 
 ### 💡 How this works:
 - I'll ask you one question at a time
@@ -902,13 +1275,13 @@ We're going to configure a few settings for your concrete slab (the road surface
 
 **Ready to start?** Just tell me about your pavement, or type **\"let's begin\"** and I'll guide you step by step! 
 
-*Example: \"I have a 4 meter square slab\" or \"let's begin\"*
+*Example: \"I have a 4 meter square slab, medium mesh, load at edge\" or \"let's begin\"*
 
 ---
 
 ### 📊 Progress
-- Completed: **0/15 (0%)**
-- Remaining: **15**
+- Completed: **0/11 (0%)**
+- Remaining: **11**
 - Next focus: **Slab Length**
 """
 
@@ -923,7 +1296,7 @@ Great job! We've successfully configured all the parameters for your pavement an
         msg += f"\n### {category}\n"
         for key in keys:
             info = PARAM_INFO[key]
-            value = params[key]
+            value = params.get(key, get_default_value(key))
             source = "✏️ You provided" if key in user_provided else "⚙️ Default used"
             msg += f"- **{info['icon']} {info['name']}:** {format_value_with_unit(value, key)} ({source})\n"
 

@@ -21,17 +21,18 @@ export default function ChatPanel(props: {
     <div className="chat-main">
       <div className="chat-messages" ref={scrollerRef} role="log" aria-live="polite" aria-relevant="additions">
         {messages.length === 0 ? (
-          <div style={{ 
-            height: '100%', 
-            display: 'flex', 
-            flexDirection: 'column', 
-            alignItems: 'center', 
-            justifyContent: 'center', 
-            opacity: 0.5,
-            textAlign: 'center'
-          }}>
-            <div style={{ fontSize: '48px', marginBottom: '16px' }}>💬</div>
-            <p>Ready to assist.</p>
+          <div className="chat-empty-state">
+            <div className="empty-icon">
+              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 2a2 2 0 0 1 2 2v2a2 2 0 0 1-2 2 2 2 0 0 1-2-2V4a2 2 0 0 1 2-2Z"/>
+                <path d="m2 6 6 6"/>
+                <path d="m22 6-6 6"/>
+                <path d="M12 10a12.1 12.1 0 0 0-6 4v5a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2v-5a12.1 12.1 0 0 0-6-4Z"/>
+                <path d="M8 20a4 4 0 0 1 8 0"/>
+              </svg>
+            </div>
+            <h3>Pavement Assistant</h3>
+            <p>Ready to configure your project.</p>
           </div>
         ) : (
           messages.map((m) => <ChatMessageView key={m.id} msg={m} />)

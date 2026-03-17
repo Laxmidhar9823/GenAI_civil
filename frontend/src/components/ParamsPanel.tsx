@@ -1,5 +1,7 @@
 import { useMemo } from 'react'
 
+const HIDDEN_COLLECTED_KEYS = new Set(['mesh_type', 'load_location'])
+
 function downloadBlob(filename: string, blob: Blob) {
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
@@ -27,6 +29,13 @@ function toTxtReport(params: Record<string, unknown>) {
   return lines.join('\n')
 }
 
+function sanitizeExportPayload(payload: Record<string, unknown>): Record<string, unknown> {
+  const cloned = JSON.parse(JSON.stringify(payload)) as Record<string, unknown>
+  delete cloned.mesh_type
+  delete cloned.load_location
+  return cloned
+}
+
 export default function ParamsPanel(props: {
   progress: { done: number; total: number }
   paramInfo: Record<string, any> | null
@@ -36,8 +45,12 @@ export default function ParamsPanel(props: {
   const { progress, paramInfo, collected, finalParams } = props
 
   const keys = useMemo(() => {
-    if (paramInfo) return Object.keys(paramInfo)
-    if (collected) return Object.keys(collected)
+    if (paramInfo) {
+      return Object.keys(paramInfo).filter((k) => !HIDDEN_COLLECTED_KEYS.has(k))
+    }
+    if (collected) {
+      return Object.keys(collected).filter((k) => !HIDDEN_COLLECTED_KEYS.has(k))
+    }
     return []
   }, [paramInfo, collected])
 
@@ -119,7 +132,8 @@ export default function ParamsPanel(props: {
                 className="btn primary" 
                 style={{ width: '100%' }}
                 onClick={() => {
-                 const prettyJson = JSON.stringify(finalParams, null, 2)
+                const sanitized = sanitizeExportPayload(finalParams)
+                const prettyJson = JSON.stringify(sanitized, null, 2)
                  const blob = new Blob([prettyJson], { type: 'application/json' })
                  downloadBlob('pavement-config.json', blob)
                 }}
@@ -131,7 +145,7 @@ export default function ParamsPanel(props: {
                className="btn"
                style={{ width: '100%', marginTop: '10px' }}
                onClick={() => {
-                 const txt = toTxtReport(finalParams)
+                 const txt = toTxtReport(sanitizeExportPayload(finalParams))
                  const blob = new Blob([txt], { type: 'text/plain' })
                  downloadBlob('pavement-config.txt', blob)
                }}

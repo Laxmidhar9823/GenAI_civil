@@ -47,15 +47,24 @@ export function extractFinalParams(
   state: StateLike,
   finalParamsFromResponse?: Record<string, unknown> | null,
 ): Record<string, unknown> | null {
-  if (finalParamsFromResponse && typeof finalParamsFromResponse === 'object') return finalParamsFromResponse
+  if (finalParamsFromResponse && typeof finalParamsFromResponse === 'object') {
+    return finalParamsFromResponse
+  }
   if (!state || typeof state !== 'object') return null
 
   const s = state as ObjectLike
-  const candidates = [s.final_params, s.finalParams, s.params, s.parameters, s.configuration, s.collected_params]
+  const candidates = [s.final_params, s.finalParams, s.configuration]
 
   for (const c of candidates) {
-    if (c && typeof c === 'object' && !Array.isArray(c)) {
-      return c as Record<string, unknown>
+    if (!c || typeof c !== 'object' || Array.isArray(c)) continue
+    const obj = c as Record<string, unknown>
+    const hasFinalShape =
+      typeof obj.nodes === 'object' &&
+      typeof obj.slab === 'object' &&
+      typeof obj.subgrade === 'object' &&
+      typeof obj.loads === 'object'
+    if (hasFinalShape) {
+      return obj
     }
   }
 

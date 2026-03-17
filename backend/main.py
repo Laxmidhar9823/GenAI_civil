@@ -26,6 +26,9 @@ from backend.agent_logic import (
     build_conversation_context,
     find_first_inconsistent_param,
     get_default_value,
+    apply_implicit_inferences,
+    normalize_load_location,
+    normalize_mesh_type,
     with_progress_tail,
 )
 from backend.ollama import (
@@ -258,11 +261,15 @@ def chat(req: ChatRequest) -> ChatResponse:
             for key in missing:
                 state.params[key] = get_default_value(key)
 
+            _, inference_notes = apply_implicit_inferences(state.params, state.user_provided_keys)
+
             state.mode = "complete"
             if missing:
                 response = f"Perfect. I filled the remaining {len(missing)} values with safe defaults.\n\n"
             else:
                 response = "Everything is already filled in.\n\n"
+            if inference_notes:
+                response += "\n".join(f"- {note}" for note in inference_notes) + "\n\n"
             response += generate_completion_message(state.params, state.user_provided_keys)
         else:
             extracted_multiple = result.get("extracted_multiple") or {}
@@ -276,6 +283,12 @@ def chat(req: ChatRequest) -> ChatResponse:
                     if key in PARAM_ORDER and isinstance(val, (int, float)):
                         updates[key] = float(val)
                         explicit_keys.add(key)
+                    elif key in {"x1", "x2", "y1", "y2"} and isinstance(val, (int, float)):
+                        updates[key] = float(val)
+                        explicit_keys.add(key)
+                    elif key in {"mesh_type", "load_location"} and isinstance(val, str):
+                        updates[key] = val.strip().lower()
+                        explicit_keys.add(key)
                     elif key in {"x", "y"} and isinstance(val, list) and all(
                         isinstance(item, (int, float)) for item in val
                     ):
@@ -286,6 +299,12 @@ def chat(req: ChatRequest) -> ChatResponse:
             single_key = result.get("parameter_key") or state.current_asking
             if isinstance(single_value, (int, float)) and single_key in PARAM_ORDER:
                 updates[single_key] = float(single_value)
+                explicit_keys.add(single_key)
+            elif isinstance(single_value, (int, float)) and single_key in {"x1", "x2", "y1", "y2"}:
+                updates[single_key] = float(single_value)
+                explicit_keys.add(single_key)
+            elif isinstance(single_value, str) and single_key in {"mesh_type", "load_location"}:
+                updates[single_key] = single_value.strip().lower()
                 explicit_keys.add(single_key)
             elif isinstance(single_value, list) and single_key in {"x", "y"} and all(
                 isinstance(item, (int, float)) for item in single_value
@@ -316,6 +335,11 @@ def chat(req: ChatRequest) -> ChatResponse:
                     if conversion_msg:
                         conversion_notes.append(conversion_msg)
 
+                if key == "mesh_type" and isinstance(working_value, str):
+                    working_value = normalize_mesh_type(working_value) or working_value
+                if key == "load_location" and isinstance(working_value, str):
+                    working_value = normalize_load_location(working_value) or working_value
+
                 is_valid, error_msg = validate_single_param(key, working_value, tentative)
                 if is_valid:
                     tentative[key] = working_value
@@ -330,6 +354,14 @@ def chat(req: ChatRequest) -> ChatResponse:
                     if key in explicit_keys and key not in default_applied_keys and key not in state.user_provided_keys:
                         state.user_provided_keys.append(key)
 
+                inferred_keys, inference_notes = apply_implicit_inferences(state.params, state.user_provided_keys)
+                for inferred_key in inferred_keys:
+                    if inferred_key in tentative:
+                        tentative[inferred_key] = state.params[inferred_key]
+                applied.extend([k for k in inferred_keys if k not in applied])
+            else:
+                inference_notes = []
+
             if not applied and not problems:
                 response = result.get("friendly_response") or (
                     "I want to make sure I capture this correctly. You can share multiple details together, "
@@ -342,6 +374,9 @@ def chat(req: ChatRequest) -> ChatResponse:
 
                 if conversion_notes:
                     parts.append("\n".join(f"📐 {note}" for note in conversion_notes))
+
+                if inference_notes:
+                    parts.append("\n".join(f"🧠 {note}" for note in inference_notes))
 
                 if applied:
                     captured = "\n".join(

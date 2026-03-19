@@ -1176,6 +1176,22 @@ def process_user_input_with_llm(
             "friendly_response": "Got it! I'll use the default values for all remaining parameters.",
         }
 
+    # Deterministic guided fallback: if we're asking a specific field and the
+    # user provided a number, capture it without requiring an LLM call.
+    if current_asking:
+        num, unit = _extract_first_number_with_unit(user_input)
+        if isinstance(num, (int, float)):
+            return {
+                "understood_value": float(num),
+                "use_default": False,
+                "use_all_defaults": False,
+                "needs_clarification": False,
+                "friendly_response": "Thanks, I captured that value.",
+                "original_unit": unit,
+                "parameter_key": current_asking,
+                "extracted_multiple": {},
+            }
+
     try:
         system_message = SystemMessage(content=create_conversational_system_prompt())
         extraction_prompt = create_extraction_prompt(user_input, context, current_asking)
@@ -1244,10 +1260,43 @@ def process_user_input_with_llm(
             "needs_clarification": True,
             "friendly_response": "The model is taking too long to respond right now. Please try again, use 'let's begin' for guided mode, or provide multiple numeric values in one message.",
         }
-    except Exception:
+    except Exception as exc:
+        err_text = str(exc).strip()
+        lowered_err = err_text.lower()
+
+        if "model" in lowered_err and "not found" in lowered_err:
+            return {
+                "needs_clarification": True,
+                "friendly_response": (
+                    "I couldn't use the selected Ollama model because it is not installed. "
+                    "Please choose an available model in settings, or try again and I'll continue with a fallback model if available."
+                ),
+            }
+
+        if "unauthorized" in lowered_err or "status code: 401" in lowered_err:
+            return {
+                "needs_clarification": True,
+                "friendly_response": (
+                    "Your Ollama model request is unauthorized (401). "
+                    "This usually means the selected cloud model needs authentication. "
+                    "Please switch to a locally available model in settings or configure Ollama cloud auth, then try again."
+                ),
+            }
+
+        if "cannot reach ollama" in lowered_err or "connection" in lowered_err:
+            return {
+                "needs_clarification": True,
+                "friendly_response": (
+                    "I couldn't reach your Ollama server. Please ensure Ollama is running and the URL is correct, then try again."
+                ),
+            }
+
         return {
             "needs_clarification": True,
-            "friendly_response": "I had a small hiccup processing that. Could you try again? 😊",
+            "friendly_response": (
+                "I hit an internal processing issue while understanding that message. "
+                "Please try again in one sentence with key values (for example: length 5m, width 5m, thickness 200mm)."
+            ),
         }
 
 

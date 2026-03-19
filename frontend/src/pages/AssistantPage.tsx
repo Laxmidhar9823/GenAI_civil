@@ -21,7 +21,7 @@ export default function AssistantPage() {
   const [, setHealthBusy] = useState(false)
   const [backendHealthy, setBackendHealthy] = useState<boolean | null>(null)
   const [ollamaUrl, setOllamaUrl] = useState(() => localStorage.getItem('ollamaUrl') || 'http://localhost:11434')
-  const [model, setModel] = useState(() => localStorage.getItem('ollamaModel') || 'gemma3:12b')
+  const [model, setModel] = useState(() => localStorage.getItem('ollamaModel') || 'qwen3.5:cloud')
   const [ollamaStatus, setOllamaStatus] = useState<OllamaCheckState>({ kind: 'unknown' })
 
   const emptyConversationState: ConversationState = {
@@ -116,6 +116,14 @@ export default function AssistantPage() {
     setOllamaStatus({ kind: 'checking' })
     try {
       const res = await apiOllamaStatus({ ollama_url: ollamaUrl, model })
+
+      if (res.error) {
+        setOllamaStatus({
+          kind: 'error',
+          detail: res.detail || res.error,
+        })
+        return
+      }
       
       if (!res.connected) {
         setOllamaStatus({

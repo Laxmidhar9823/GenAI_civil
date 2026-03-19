@@ -2,6 +2,7 @@ type FetchJsonOptions = {
   method?: 'GET' | 'POST'
   body?: unknown
   signal?: AbortSignal
+  headers?: Record<string, string>
 }
 import type {
   ChatResponse,
@@ -75,6 +76,7 @@ async function fetchJson<T>(path: string, options: FetchJsonOptions = {}): Promi
         method: options.method ?? 'GET',
         headers: {
           'Content-Type': 'application/json',
+          ...(options.headers ?? {}),
         },
         body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
         signal: options.signal,
@@ -117,6 +119,7 @@ async function fetchJson<T>(path: string, options: FetchJsonOptions = {}): Promi
 export type LLMConfig = {
   ollama_url: string
   model: string
+  api_key?: string
 }
 
 export async function apiReset(): Promise<ResetResponse> {

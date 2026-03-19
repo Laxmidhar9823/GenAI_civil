@@ -47,7 +47,7 @@ export default function DocsPage() {
             </li>
             <li>
               Use a model tag, for example <span className="kbd">kimi-k2.5:cloud</span> or{' '}
-              <span className="kbd">gemma3:12b</span>.
+              <span className="kbd">qwen3.5:cloud</span>.
             </li>
             <li>
               Set URL <span className="kbd">http://localhost:11434</span> and model name in Assistant.

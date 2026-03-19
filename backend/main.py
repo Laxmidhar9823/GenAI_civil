@@ -2,7 +2,7 @@ import os
 import uuid
 from typing import Dict
 
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -156,11 +156,12 @@ def health() -> Dict[str, object]:
 @app.get("/ollama/status", response_model=OllamaStatusResponse)
 def ollama_status(
     ollama_url: str = Query("http://localhost:11434"),
-    model: str = Query("gemma3:12b"),
+    model: str = Query("qwen3.5:cloud"),
     timeout_seconds: float = Query(5.0, ge=1.0, le=30.0),
+    x_ollama_api_key: str | None = Header(default=None, alias="x-ollama-api-key"),
 ):
     connected, model_available, available_models, error = check_ollama_connection(
-        ollama_url, model, timeout_seconds
+        ollama_url, model, timeout_seconds, api_key=x_ollama_api_key
     )
     matched_model = resolve_model_match(model, available_models) if connected else None
     suggestions = (
@@ -169,7 +170,7 @@ def ollama_status(
         else []
     )
     detail = None
-    if not connected and error:
+    if error:
         detail = error
     elif connected and not model_available:
         detail = f'Model "{model}" is not available on this Ollama server.'
@@ -237,6 +238,7 @@ def chat(req: ChatRequest) -> ChatResponse:
     lower_input = req.user_input.lower().strip()
 
     response = ""
+    model_notice = ""
 
     if lower_input in ["let's begin", "lets begin", "start", "begin", "guide me", "help me"]:
         state.mode = "guided"
@@ -252,7 +254,24 @@ def chat(req: ChatRequest) -> ChatResponse:
             )
             response += generate_interactive_followup(state.params)
     else:
-        llm = get_ollama_llm(req.llm_config.ollama_url, req.llm_config.model)
+        requested_model = req.llm_config.model
+        api_key = req.llm_config.api_key
+        effective_model = requested_model
+        connected, model_available, available_models, _ = check_ollama_connection(
+            req.llm_config.ollama_url,
+            requested_model,
+            timeout_seconds=3.0,
+            api_key=api_key,
+        )
+
+        if connected and not model_available and available_models:
+            effective_model = available_models[0]
+            model_notice = (
+                f"Model '{requested_model}' is not installed on your Ollama server. "
+                f"Using available model '{effective_model}' instead."
+            )
+
+        llm = get_ollama_llm(req.llm_config.ollama_url, effective_model, api_key=api_key)
         result = process_user_input_with_llm(req.user_input, llm, context, state.current_asking)
 
         use_all_defaults = bool(result.get("use_all_defaults") or check_use_all_defaults_intent(req.user_input))
@@ -417,6 +436,9 @@ def chat(req: ChatRequest) -> ChatResponse:
                     "I want to make sure I understood you correctly. "
                     "Please share any values you know, and I can capture several at once."
                 )
+
+    if model_notice:
+        response = f"{model_notice}\n\n{response}".strip()
 
     response = with_progress_tail(
         response,

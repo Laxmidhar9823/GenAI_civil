@@ -1,5 +1,6 @@
+import os
 from difflib import get_close_matches
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import requests
 from langchain_ollama import ChatOllama
@@ -7,12 +8,32 @@ from langchain_ollama import ChatOllama
 DEFAULT_OLLAMA_TIMEOUT = 5.0
 
 
-def get_ollama_llm(base_url: str = "http://localhost:11434", model: str = "gemma3:12b"):
+def _build_auth_headers(api_key: Optional[str] = None) -> Dict[str, str]:
+    raw = (api_key or os.getenv("OLLAMA_API_KEY", "")).strip()
+    if not raw:
+        return {}
+    if raw.lower().startswith("bearer "):
+        token = raw.split(" ", 1)[1].strip()
+    else:
+        token = raw
+    if not token:
+        return {}
+    return {"Authorization": f"Bearer {token}"}
+
+
+def get_ollama_llm(
+    base_url: str = "http://localhost:11434",
+    model: str = "qwen3.5:cloud",
+    api_key: Optional[str] = None,
+):
+    headers = _build_auth_headers(api_key)
+    kwargs = {"client_kwargs": {"headers": headers}} if headers else {}
     return ChatOllama(
         model=model,
         base_url=base_url,
         temperature=0.3,
         num_predict=1000,
+        **kwargs,
     )
 
 
@@ -77,14 +98,16 @@ def suggest_available_models(requested_model: str, available_models: List[str], 
 
 def check_ollama_connection(
     base_url: str = "http://localhost:11434",
-    model_name: str = "gemma3:12b",
+    model_name: str = "qwen3.5:cloud",
     timeout_seconds: float = DEFAULT_OLLAMA_TIMEOUT,
+    api_key: Optional[str] = None,
 ) -> Tuple[bool, bool, List[str], Optional[str]]:
     normalized_url = (base_url or "").strip().rstrip("/")
     endpoint = f"{normalized_url}/api/tags"
+    headers = _build_auth_headers(api_key)
 
     try:
-        response = requests.get(endpoint, timeout=timeout_seconds)
+        response = requests.get(endpoint, timeout=timeout_seconds, headers=headers or None)
         response.raise_for_status()
         payload = response.json()
         if not isinstance(payload, dict):
@@ -108,6 +131,8 @@ def check_ollama_connection(
         return False, False, [], f"Cannot reach Ollama at {normalized_url}. Verify URL and that the server is running."
     except requests.exceptions.HTTPError as exc:
         status_code = exc.response.status_code if exc.response is not None else "unknown"
+        if status_code == 401:
+            return False, False, [], "Ollama Cloud authorization failed (401). Provide a valid API key."
         return False, False, [], f"Ollama API request to {endpoint} failed with HTTP {status_code}."
     except ValueError:
         return False, False, [], "Ollama returned an invalid JSON response."

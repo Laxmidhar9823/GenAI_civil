@@ -44,7 +44,7 @@ export default function OllamaSettings(props: {
               className="input"
               value={model}
               onChange={(e) => setModel(e.target.value)}
-              placeholder="gemma3:12b"
+              placeholder="qwen3.5:cloud"
               autoComplete="off"
             />
           </div>

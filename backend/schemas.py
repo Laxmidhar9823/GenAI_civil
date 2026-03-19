@@ -19,7 +19,8 @@ class ConversationState(BaseModel):
 
 class LLMConfig(BaseModel):
     ollama_url: str = "http://localhost:11434"
-    model: str = "gemma3:12b"
+    model: str = "qwen3.5:cloud"
+    api_key: Optional[str] = None
 
 
 class ChatRequest(BaseModel):

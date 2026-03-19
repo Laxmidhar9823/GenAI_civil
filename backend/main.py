@@ -313,6 +313,18 @@ def chat(req: ChatRequest) -> ChatResponse:
                     ):
                         updates[key] = [float(item) for item in val]
                         explicit_keys.add(key)
+                    elif key == "load_cases" and isinstance(val, list):
+                        normalized_cases = []
+                        for case in val:
+                            if not isinstance(case, dict):
+                                continue
+                            required = ["x1", "x2", "y1", "y2", "q"]
+                            if not all(k in case and isinstance(case[k], (int, float)) for k in required):
+                                continue
+                            normalized_cases.append({k: float(case[k]) for k in required})
+                        if normalized_cases:
+                            updates[key] = normalized_cases
+                            explicit_keys.add(key)
 
             single_value = result.get("understood_value")
             single_key = result.get("parameter_key") or state.current_asking
@@ -338,10 +350,16 @@ def chat(req: ChatRequest) -> ChatResponse:
 
             tentative = dict(state.params)
             applied: List[str] = []
+            applied_load_cases = False
             problems: List[str] = []
             conversion_notes: List[str] = []
 
             for key, value in updates.items():
+                if key == "load_cases" and isinstance(value, list):
+                    tentative["load_cases"] = value
+                    applied_load_cases = True
+                    continue
+
                 working_value = value
                 unit_for_key = extracted_units.get(key)
                 if key == single_key and result.get("original_unit"):
@@ -367,7 +385,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                     info = PARAM_INFO.get(key, {"name": key})
                     problems.append(f"{info['name']}: {error_msg}")
 
-            if applied:
+            if applied or applied_load_cases:
                 state.params = tentative
                 for key in applied:
                     if key in explicit_keys and key not in default_applied_keys and key not in state.user_provided_keys:

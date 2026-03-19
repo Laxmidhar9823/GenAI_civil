@@ -430,6 +430,81 @@ def infer_load_patch_from_location(load_location: str, a: float, b: float) -> Di
     }
 
 
+def infer_load_patch_from_contact_area(
+    load_location: str,
+    a: float,
+    b: float,
+    contact_lx_mm: float,
+    contact_ly_mm: float,
+) -> Dict[str, float]:
+    location = normalize_load_location(load_location) or "interior"
+    slab_a = float(a)
+    slab_b = float(b)
+    lx = max(1.0, float(contact_lx_mm))
+    ly = max(1.0, float(contact_ly_mm))
+
+    if location == "corner":
+        return {
+            "x1": 0.0,
+            "x2": round(min(slab_a, lx), 3),
+            "y1": 0.0,
+            "y2": round(min(slab_b, ly), 3),
+        }
+
+    if location == "edge":
+        x1 = max(0.0, (slab_a - lx) / 2.0)
+        return {
+            "x1": round(x1, 3),
+            "x2": round(min(slab_a, x1 + lx), 3),
+            "y1": 0.0,
+            "y2": round(min(slab_b, ly), 3),
+        }
+
+    x1 = max(0.0, (slab_a - lx) / 2.0)
+    y1 = max(0.0, (slab_b - ly) / 2.0)
+    return {
+        "x1": round(x1, 3),
+        "x2": round(min(slab_a, x1 + lx), 3),
+        "y1": round(y1, 3),
+        "y2": round(min(slab_b, y1 + ly), 3),
+    }
+
+
+def _extract_spacing_mm(text: str) -> Optional[float]:
+    patterns = [
+        r"(?:spacing|wheel\s*spacing|axle\s*spacing|c\s*/\s*c|center\s*to\s*center|centre\s*to\s*centre)\s*(?:of|=|:|is)?\s*(\d+(?:\.\d+)?)\s*(mm|cm|m|meter|meters)",
+        r"(\d+(?:\.\d+)?)\s*(mm|cm|m|meter|meters)\s*(?:spacing|c\s*/\s*c|center\s*to\s*center|centre\s*to\s*centre)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if not match:
+            continue
+        return _length_to_mm(float(match.group(1)), match.group(2))
+    return None
+
+
+def _offset_load_patch(
+    patch: Dict[str, float], spacing_mm: float, slab_a: float, slab_b: float
+) -> Dict[str, float]:
+    x1 = float(patch["x1"])
+    x2 = float(patch["x2"])
+    y1 = float(patch["y1"])
+    y2 = float(patch["y2"])
+    spacing = float(spacing_mm)
+
+    # Prefer offset along slab length (x-direction), then fallback to width.
+    if x2 + spacing <= slab_a:
+        return {"x1": round(x1 + spacing, 3), "x2": round(x2 + spacing, 3), "y1": y1, "y2": y2}
+    if x1 - spacing >= 0.0:
+        return {"x1": round(x1 - spacing, 3), "x2": round(x2 - spacing, 3), "y1": y1, "y2": y2}
+    if y2 + spacing <= slab_b:
+        return {"x1": x1, "x2": x2, "y1": round(y1 + spacing, 3), "y2": round(y2 + spacing, 3)}
+    if y1 - spacing >= 0.0:
+        return {"x1": x1, "x2": x2, "y1": round(y1 - spacing, 3), "y2": round(y2 - spacing, 3)}
+
+    return {"x1": x1, "x2": x2, "y1": y1, "y2": y2}
+
+
 def apply_implicit_inferences(params: Dict[str, Any], user_provided_keys: List[str]) -> Tuple[List[str], List[str]]:
     applied: List[str] = []
     notes: List[str] = []
@@ -541,8 +616,10 @@ def validate_single_param(key: str, value: Any, all_params: Dict[str, Any]) -> T
 
     if "max_value" in info and value > info["max_value"]:
         return False, f"This value is too high! The maximum allowed is {info['max_value']} {info.get('unit', '')}."
-    if key in ["Emod", "a", "b", "t", "Kx", "Ky", "Kz"] and value <= 0:
+    if key in ["Emod", "a", "b", "t"] and value <= 0:
         return False, "This value must be greater than zero."
+    if key in ["Kx", "Ky", "Kz"] and value < 0:
+        return False, "This value cannot be negative."
     if key == "nu" and (value < 0.15 or value > 0.2):
         return False, "For concrete pavements, use a Poisson's ratio between 0.15 and 0.2."
     if key == "x1" and "a" in all_params and value > all_params["a"]:
@@ -755,6 +832,51 @@ def _length_to_mm(value: float, unit: Optional[str]) -> float:
     return float(value) * multipliers.get(unit_lower, 1.0)
 
 
+def _extract_assumed_values(text: str) -> Dict[str, float]:
+    key_map = {
+        "emod": "Emod",
+        "nu": "nu",
+        "a": "a",
+        "b": "b",
+        "t": "t",
+        "kx": "Kx",
+        "ky": "Ky",
+        "kz": "Kz",
+        "x1": "x1",
+        "x2": "x2",
+        "y1": "y1",
+        "y2": "y2",
+        "q": "q",
+    }
+
+    assumed: Dict[str, float] = {}
+    # Parse each "assume ..." clause independently.
+    for clause_match in re.finditer(r"\bassume\b[^.\n;]*", text):
+        clause = clause_match.group(0)
+
+        # Supports compact chained assignments like: kx=ky=0
+        chain_match = re.search(
+            r"\b(emod|nu|a|b|t|kx|ky|kz|x1|x2|y1|y2|q)\b\s*=\s*"
+            r"\b(emod|nu|a|b|t|kx|ky|kz|x1|x2|y1|y2|q)\b\s*=\s*(-?\d+(?:\.\d+)?)",
+            clause,
+        )
+        if chain_match:
+            k1 = key_map[chain_match.group(1)]
+            k2 = key_map[chain_match.group(2)]
+            v = float(chain_match.group(3))
+            assumed[k1] = v
+            assumed[k2] = v
+
+        # Supports explicit assignments like: assume kx=0, ky=0
+        for key, value in re.findall(
+            r"\b(emod|nu|a|b|t|kx|ky|kz|x1|x2|y1|y2|q)\b\s*=\s*(-?\d+(?:\.\d+)?)",
+            clause,
+        ):
+            assumed[key_map[key]] = float(value)
+
+    return assumed
+
+
 def _extract_engineering_candidates(text: str) -> Tuple[Dict[str, Any], Dict[str, str]]:
     lowered = text.lower().replace("\n", " ")
     out: Dict[str, Any] = {}
@@ -847,31 +969,76 @@ def _extract_engineering_candidates(text: str) -> Tuple[Dict[str, Any], Dict[str
         area_lx_mm = _length_to_mm(float(area_match.group(1)), area_match.group(2))
         area_ly_mm = _length_to_mm(float(area_match.group(3)), area_match.group(4))
 
-    inferred_location = infer_semantic_choices(text).get(LOAD_LOCATION_KEY)
-    slab_a = float(out["a"]) if "a" in out else None
-    slab_b = float(out["b"]) if "b" in out else None
+    spacing_mm = _extract_spacing_mm(lowered)
+    tandem_requested = bool(
+        re.search(r"\btandem\s*axle\b|\btandem\b|\bdual\s*wheel\b|\bdouble\s*wheel\b", lowered)
+    )
 
-    if inferred_location and area_lx_mm is not None and area_ly_mm is not None:
-        lx = float(area_lx_mm)
-        ly = float(area_ly_mm)
-        if inferred_location == "corner":
-            out["x1"] = 0.0
-            out["x2"] = min(lx, slab_a) if slab_a is not None else lx
-            out["y1"] = 0.0
-            out["y2"] = min(ly, slab_b) if slab_b is not None else ly
-        elif inferred_location == "edge" and slab_a is not None:
-            x1 = max(0.0, (slab_a - lx) / 2.0)
-            out["x1"] = round(x1, 3)
-            out["x2"] = round(min(slab_a, x1 + lx), 3)
-            out["y1"] = 0.0
-            out["y2"] = round(min(ly, slab_b), 3) if slab_b is not None else round(ly, 3)
-        elif inferred_location == "interior" and slab_a is not None and slab_b is not None:
-            x1 = max(0.0, (slab_a - lx) / 2.0)
-            y1 = max(0.0, (slab_b - ly) / 2.0)
-            out["x1"] = round(x1, 3)
-            out["x2"] = round(min(slab_a, x1 + lx), 3)
-            out["y1"] = round(y1, 3)
-            out["y2"] = round(min(slab_b, y1 + ly), 3)
+    inferred_location = infer_semantic_choices(text).get(LOAD_LOCATION_KEY)
+    slab_a = float(out["a"]) if "a" in out else float(DEFAULT_VALUES["a"])
+    slab_b = float(out["b"]) if "b" in out else float(DEFAULT_VALUES["b"])
+
+    load_cases: List[Dict[str, float]] = []
+    if area_lx_mm is not None and area_ly_mm is not None:
+        load_case_pattern = re.compile(
+            r"[^.\n;]*?(?:wheel\s*)?load[^\d]{0,20}(\d+(?:\.\d+)?)\s*(kn|n)[^.\n;]*?\b(?:at\s+)?(corner|edge|interior)\b"
+        )
+        for case_match in load_case_pattern.finditer(lowered):
+            load_value = float(case_match.group(1))
+            load_unit = (case_match.group(2) or "n").lower()
+            location = normalize_load_location(case_match.group(3)) or "interior"
+            load_n = load_value * 1000.0 if load_unit == "kn" else load_value
+            area_mm2 = max(area_lx_mm * area_ly_mm, 1e-9)
+            q_val = round(load_n / area_mm2, 5)
+            patch = infer_load_patch_from_contact_area(location, slab_a, slab_b, area_lx_mm, area_ly_mm)
+            load_cases.append(
+                {
+                    "x1": float(patch["x1"]),
+                    "x2": float(patch["x2"]),
+                    "y1": float(patch["y1"]),
+                    "y2": float(patch["y2"]),
+                    "q": float(q_val),
+                }
+            )
+
+    if load_cases:
+        out["load_cases"] = load_cases
+        out.update(load_cases[0])
+    elif tandem_requested and inferred_location and load_match and area_lx_mm is not None and area_ly_mm is not None:
+        load_value = float(load_match.group(1))
+        load_unit = (load_match.group(2) or "n").lower()
+        load_n = load_value * 1000.0 if load_unit == "kn" else load_value
+        area_mm2 = max(area_lx_mm * area_ly_mm, 1e-9)
+        q_val = round(load_n / area_mm2, 5)
+
+        base_patch = infer_load_patch_from_contact_area(inferred_location, slab_a, slab_b, area_lx_mm, area_ly_mm)
+        second_patch = _offset_load_patch(
+            base_patch,
+            spacing_mm if isinstance(spacing_mm, (int, float)) else float(area_lx_mm),
+            slab_a,
+            slab_b,
+        )
+        load_cases = [
+            {
+                "x1": float(base_patch["x1"]),
+                "x2": float(base_patch["x2"]),
+                "y1": float(base_patch["y1"]),
+                "y2": float(base_patch["y2"]),
+                "q": float(q_val),
+            },
+            {
+                "x1": float(second_patch["x1"]),
+                "x2": float(second_patch["x2"]),
+                "y1": float(second_patch["y1"]),
+                "y2": float(second_patch["y2"]),
+                "q": float(q_val),
+            },
+        ]
+        out["load_cases"] = load_cases
+        out.update(load_cases[0])
+    elif inferred_location and area_lx_mm is not None and area_ly_mm is not None:
+        patch = infer_load_patch_from_contact_area(inferred_location, slab_a, slab_b, area_lx_mm, area_ly_mm)
+        out.update(patch)
 
     explicit_q = re.search(r"(?:pressure|\bq\b)\s*[:=-]?\s*(\d+(?:\.\d+)?)\s*(mpa|kpa|psi)?", lowered)
     if explicit_q:
@@ -885,6 +1052,11 @@ def _extract_engineering_candidates(text: str) -> Tuple[Dict[str, Any], Dict[str
 
         area_mm2 = max(area_lx_mm * area_ly_mm, 1e-9)
         out["q"] = round(load_n / area_mm2, 5)
+
+    # Explicit user assumptions should override inferred values.
+    assumed_values = _extract_assumed_values(lowered)
+    if assumed_values:
+        out.update(assumed_values)
 
     return out, units
 
@@ -1388,6 +1560,28 @@ def build_final_configuration(params: Dict[str, Any]) -> Dict[str, Any]:
     x_nodes = params.get("x") if isinstance(params.get("x"), list) else NODE_DEFAULT_VALUES["x"]
     y_nodes = params.get("y") if isinstance(params.get("y"), list) else NODE_DEFAULT_VALUES["y"]
 
+    load_cases_input = params.get("load_cases")
+    normalized_load_cases: List[Dict[str, float]] = []
+    if isinstance(load_cases_input, list):
+        for case in load_cases_input:
+            if not isinstance(case, dict):
+                continue
+            required = ["x1", "x2", "y1", "y2", "q"]
+            if not all(k in case and isinstance(case[k], (int, float)) for k in required):
+                continue
+            normalized_load_cases.append({k: float(case[k]) for k in required})
+
+    if not normalized_load_cases:
+        normalized_load_cases = [
+            {
+                "x1": float(merged["x1"]),
+                "x2": float(merged["x2"]),
+                "y1": float(merged["y1"]),
+                "y2": float(merged["y2"]),
+                "q": float(merged["q"]),
+            }
+        ]
+
     return {
         "nodes": {
             "x": [float(v) for v in x_nodes],
@@ -1404,10 +1598,10 @@ def build_final_configuration(params: Dict[str, Any]) -> Dict[str, Any]:
             "Kz": float(merged["Kz"]),
         },
         "loads": {
-            "x1": [float(merged["x1"])],
-            "x2": [float(merged["x2"])],
-            "y1": [float(merged["y1"])],
-            "y2": [float(merged["y2"])],
-            "q": [float(merged["q"])],
+            "x1": [case["x1"] for case in normalized_load_cases],
+            "x2": [case["x2"] for case in normalized_load_cases],
+            "y1": [case["y1"] for case in normalized_load_cases],
+            "y2": [case["y2"] for case in normalized_load_cases],
+            "q": [case["q"] for case in normalized_load_cases],
         },
     }

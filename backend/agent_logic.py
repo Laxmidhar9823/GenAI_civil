@@ -9,7 +9,7 @@ from langchain_ollama import ChatOllama
 
 DEFAULT_VALUES = {
     "Emod": 24000.0,
-    "nu": 0.3,
+    "nu": 0.18,
     "a": 3500,
     "b": 3500,
     "t": 200.0,
@@ -26,8 +26,8 @@ DEFAULT_VALUES = {
 }
 
 NODE_DEFAULT_VALUES = {
-    "x": [0.0, 1500.0, 3500.0],
-    "y": [0.0, 1500.0, 3500.0],
+    "x": [0.0, 350.0, 700.0, 1050.0, 1400.0, 1750.0, 2100.0, 2450.0, 2800.0, 3150.0, 3500.0],
+    "y": [0.0, 350.0, 700.0, 1050.0, 1400.0, 1750.0, 2100.0, 2450.0, 2800.0, 3150.0, 3500.0],
 }
 
 NODE_PARAM_INFO = {
@@ -38,9 +38,9 @@ NODE_PARAM_INFO = {
         "category": "Mesh / Nodes",
         "simple_explanation": "Reference mesh coordinates along slab length used by the solver grid.",
         "typical_range": "0 to slab length",
-        "example": "[0, 1500, 3500]",
+        "example": "[0, 350, 700, ..., 3500]",
         "icon": "🧭",
-        "default": [0.0, 1500.0, 3500.0],
+        "default": [0.0, 350.0, 700.0, 1050.0, 1400.0, 1750.0, 2100.0, 2450.0, 2800.0, 3150.0, 3500.0],
     },
     "y": {
         "name": "Node Coordinates (Y)",
@@ -49,9 +49,9 @@ NODE_PARAM_INFO = {
         "category": "Mesh / Nodes",
         "simple_explanation": "Reference mesh coordinates across slab width used by the solver grid.",
         "typical_range": "0 to slab width",
-        "example": "[0, 1500, 3500]",
+        "example": "[0, 350, 700, ..., 3500]",
         "icon": "🧭",
-        "default": [0.0, 1500.0, 3500.0],
+        "default": [0.0, 350.0, 700.0, 1050.0, 1400.0, 1750.0, 2100.0, 2450.0, 2800.0, 3150.0, 3500.0],
     },
 }
 
@@ -72,8 +72,8 @@ PARAM_INFO = {
         "unit": "(no unit)",
         "category": "Material Properties",
         "simple_explanation": "How much the concrete squeezes sideways when pressed down. It's always between 0 and 0.5.",
-        "typical_range": "0.15 - 0.25 for concrete",
-        "example": "For most concrete, use 0.15 to 0.2",
+        "typical_range": "0.15 - 0.2 for concrete",
+        "example": "For most concrete, use 0.18 as a standard value",
         "icon": "📐",
     },
     "a": {
@@ -228,10 +228,9 @@ PARAM_INFO = {
         "alt_units": {"kpa": 0.001, "psi": 0.00689476},
         "category": "Load",
         "simple_explanation": "How hard the tire presses on the concrete. This depends on vehicle weight and tire size.",
-        "typical_range": "0.1 - 0.7 MPa (maximum 0.7)",
-        "example": "Car: ~0.2 MPa, Truck: ~0.5-0.7 MPa",
+        "typical_range": "Varies by aircraft/vehicle load and tire contact area",
+        "example": "For 200 kN on 400 mm x 400 mm, q = 1.25 MPa",
         "icon": "🛞",
-        "max_value": 0.7,
     },
 }
 
@@ -242,10 +241,12 @@ MESH_TYPE_KEY = "mesh_type"
 LOAD_LOCATION_KEY = "load_location"
 
 MESH_LEVEL_ELEMENTS = {
-    "coarse": 2,
+    "coarse": 10,
     "medium": 15,
     "fine": 30,
 }
+
+STANDARD_POISSON_RATIO = 0.18
 
 
 def get_default_value(key: str) -> Any:
@@ -542,8 +543,8 @@ def validate_single_param(key: str, value: Any, all_params: Dict[str, Any]) -> T
         return False, f"This value is too high! The maximum allowed is {info['max_value']} {info.get('unit', '')}."
     if key in ["Emod", "a", "b", "t", "Kx", "Ky", "Kz"] and value <= 0:
         return False, "This value must be greater than zero."
-    if key == "nu" and (value < 0 or value > 0.5):
-        return False, "This value should be between 0 and 0.5."
+    if key == "nu" and (value < 0.15 or value > 0.2):
+        return False, "For concrete pavements, use a Poisson's ratio between 0.15 and 0.2."
     if key == "x1" and "a" in all_params and value > all_params["a"]:
         return False, f"This can't be larger than your slab length ({all_params['a']} mm)."
     if key == "x2" and "a" in all_params and value > all_params["a"]:
@@ -780,14 +781,29 @@ def _extract_engineering_candidates(text: str) -> Tuple[Dict[str, Any], Dict[str
     if thickness_match:
         out["t"] = round(_length_to_mm(float(thickness_match.group(1)), thickness_match.group(2)), 3)
 
+    # Allow users to request a standard concrete Poisson ratio without a numeric value.
+    if re.search(r"(?:standard|typical)\s*(?:poisson(?:'?s)?\s*ratio|\bnu\b)", lowered):
+        out["nu"] = STANDARD_POISSON_RATIO
+
+    fck_value: Optional[float] = None
+
+    # Handles phrases like "concrete compressive strength 45 MPa" or "fck 40".
     grade_match = re.search(
         r"(?:concrete\s*(?:grade|compressive\s*strength)?|grade|fck)\s*[:=-]?\s*(?:m|c)?\s*(\d+(?:\.\d+)?)",
         lowered,
     )
     if grade_match:
-        fck = float(grade_match.group(1))
-        # Standard pavement approximation used in examples: Emod = 5000 * sqrt(fck).
-        out["Emod"] = round(5000.0 * math.sqrt(fck), 3)
+        fck_value = float(grade_match.group(1))
+
+    # Handles standard grade notation like M40, M-40, C30, C-30.
+    if fck_value is None:
+        grade_code_match = re.search(r"\b(?:m|c)\s*[-:]?\s*(\d+(?:\.\d+)?)\b(?:\s*grade|\s*concrete)?", lowered)
+        if grade_code_match:
+            fck_value = float(grade_code_match.group(1))
+
+    if fck_value is not None:
+        # IS 456 empirical relation: E (MPa) = 5000 * sqrt(fck in MPa).
+        out["Emod"] = round(5000.0 * math.sqrt(fck_value), 3)
 
     # Capture subgrade/foundation modulus and apply in all directions by default.
     k_match = re.search(
@@ -812,10 +828,18 @@ def _extract_engineering_candidates(text: str) -> Tuple[Dict[str, Any], Dict[str
             out[key] = float(direct_match.group(1))
 
     load_match = re.search(r"(?:wheel\s*)?load\s*[^\d]{0,20}(\d+(?:\.\d+)?)\s*(kn|n)", lowered)
-    area_match = re.search(
-        r"(?:load\s*)?(?:tire|tyre)?\s*contact\s*area\s*[:=-]?\s*(\d+(?:\.\d+)?)\s*(mm|cm|m|meter|meters)?\s*[x×]\s*(\d+(?:\.\d+)?)\s*(mm|cm|m|meter|meters)?",
-        lowered,
-    )
+
+    area_match: Optional[re.Match[str]] = None
+    area_patterns = [
+        r"(?:load\s*)?(?:tire|tyre)?\s*contact\s*(?:area|patch)?\s*[:=-]?\s*(\d+(?:\.\d+)?)\s*(mm|cm|m|meter|meters)?\s*[x×]\s*(\d+(?:\.\d+)?)\s*(mm|cm|m|meter|meters)?",
+        r"(?:contact\s*(?:area|patch)?\s*(?:of|is|=|:)?\s*)(\d+(?:\.\d+)?)\s*(mm|cm|m|meter|meters)?\s*[x×]\s*(\d+(?:\.\d+)?)\s*(mm|cm|m|meter|meters)?",
+        r"(\d+(?:\.\d+)?)\s*(mm|cm|m|meter|meters)?\s*[x×]\s*(\d+(?:\.\d+)?)\s*(mm|cm|m|meter|meters)?\s*(?:contact|contact\s*area|contact\s*patch|tire\s*contact|tyre\s*contact)",
+    ]
+    for pattern in area_patterns:
+        candidate = re.search(pattern, lowered)
+        if candidate:
+            area_match = candidate
+            break
 
     area_lx_mm: Optional[float] = None
     area_ly_mm: Optional[float] = None
@@ -1032,7 +1056,7 @@ def create_extraction_prompt(user_input: str, context: str, current_asking: Opti
 
 ### NODE CONTEXT
 - Node coordinates are inferred from mesh_type:
-    - coarse -> 2x2 elements (3 nodes each direction)
+    - coarse -> 10x10 elements
     - medium -> 15x15 elements
     - fine -> 30x30 elements
 - Load coordinates are inferred from load_location:

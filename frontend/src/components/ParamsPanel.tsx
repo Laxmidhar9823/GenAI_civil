@@ -64,6 +64,7 @@ export default function ParamsPanel(props: {
 
       return {
         key: k,
+        symbol: k,
         value: source[k],
         mainLabel,
       }
@@ -105,7 +106,10 @@ export default function ParamsPanel(props: {
                   {rows.map((r) => (
                     <tr key={r.key}>
                       <td>
-                        <div style={{ fontWeight: 500, fontSize: '13px' }}>{r.mainLabel}</div>
+                        <div className="param-label-wrap">
+                          <span className="param-symbol" title={`Symbol: ${r.symbol}`}>{r.symbol}</span>
+                          <span className="param-main-label">{r.mainLabel}</span>
+                        </div>
                       </td>
                       <td>
                         {r.value === undefined || r.value === null || String(r.value) === '' ? 

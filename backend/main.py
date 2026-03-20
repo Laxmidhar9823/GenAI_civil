@@ -274,8 +274,92 @@ def chat(req: ChatRequest) -> ChatResponse:
         llm = get_ollama_llm(req.llm_config.ollama_url, effective_model, api_key=api_key)
         result = process_user_input_with_llm(req.user_input, llm, context, state.current_asking)
 
+        extracted_multiple = result.get("extracted_multiple") or {}
+        extracted_units = result.get("extracted_units") or {}
+        single_value = result.get("understood_value")
+        single_key = result.get("parameter_key") or state.current_asking
+
         use_all_defaults = bool(result.get("use_all_defaults") or check_use_all_defaults_intent(req.user_input))
         if use_all_defaults:
+            prefill_updates: Dict[str, object] = {}
+            prefill_explicit_keys = set()
+
+            if isinstance(extracted_multiple, dict):
+                for key, val in extracted_multiple.items():
+                    if key in PARAM_ORDER and isinstance(val, (int, float)):
+                        prefill_updates[key] = float(val)
+                        prefill_explicit_keys.add(key)
+                    elif key in {"x1", "x2", "y1", "y2"} and isinstance(val, (int, float)):
+                        prefill_updates[key] = float(val)
+                        prefill_explicit_keys.add(key)
+                    elif key in {"mesh_type", "load_location"} and isinstance(val, str):
+                        prefill_updates[key] = val.strip().lower()
+                        prefill_explicit_keys.add(key)
+                    elif key in {"x", "y"} and isinstance(val, list) and all(
+                        isinstance(item, (int, float)) for item in val
+                    ):
+                        prefill_updates[key] = [float(item) for item in val]
+                        prefill_explicit_keys.add(key)
+                    elif key == "load_cases" and isinstance(val, list):
+                        normalized_cases = []
+                        for case in val:
+                            if not isinstance(case, dict):
+                                continue
+                            required = ["x1", "x2", "y1", "y2", "q"]
+                            if not all(k in case and isinstance(case[k], (int, float)) for k in required):
+                                continue
+                            normalized_cases.append({k: float(case[k]) for k in required})
+                        if normalized_cases:
+                            prefill_updates[key] = normalized_cases
+                            prefill_explicit_keys.add(key)
+
+            if isinstance(single_value, (int, float)) and single_key in PARAM_ORDER:
+                prefill_updates[single_key] = float(single_value)
+                prefill_explicit_keys.add(single_key)
+            elif isinstance(single_value, (int, float)) and single_key in {"x1", "x2", "y1", "y2"}:
+                prefill_updates[single_key] = float(single_value)
+                prefill_explicit_keys.add(single_key)
+            elif isinstance(single_value, str) and single_key in {"mesh_type", "load_location"}:
+                prefill_updates[single_key] = single_value.strip().lower()
+                prefill_explicit_keys.add(single_key)
+            elif isinstance(single_value, list) and single_key in {"x", "y"} and all(
+                isinstance(item, (int, float)) for item in single_value
+            ):
+                prefill_updates[single_key] = [float(item) for item in single_value]
+                prefill_explicit_keys.add(single_key)
+
+            tentative = dict(state.params)
+            explicit_applied: List[str] = []
+            for key, value in prefill_updates.items():
+                if key == "load_cases" and isinstance(value, list):
+                    tentative["load_cases"] = value
+                    explicit_applied.append(key)
+                    continue
+
+                working_value = value
+                unit_for_key = extracted_units.get(key)
+                if key == single_key and result.get("original_unit"):
+                    unit_for_key = result.get("original_unit")
+                if unit_for_key and isinstance(working_value, (int, float)):
+                    converted_value, _ = convert_to_standard_unit(float(working_value), unit_for_key, key)
+                    working_value = converted_value
+
+                if key == "mesh_type" and isinstance(working_value, str):
+                    working_value = normalize_mesh_type(working_value) or working_value
+                if key == "load_location" and isinstance(working_value, str):
+                    working_value = normalize_load_location(working_value) or working_value
+
+                is_valid, _ = validate_single_param(key, working_value, tentative)
+                if is_valid:
+                    tentative[key] = working_value
+                    explicit_applied.append(key)
+
+            if explicit_applied:
+                state.params = tentative
+                for key in explicit_applied:
+                    if key in prefill_explicit_keys and key != "load_cases" and key not in state.user_provided_keys:
+                        state.user_provided_keys.append(key)
+
             missing = [k for k in PARAM_ORDER if k not in state.params]
             for key in missing:
                 state.params[key] = get_default_value(key)
@@ -291,8 +375,6 @@ def chat(req: ChatRequest) -> ChatResponse:
                 response += "\n".join(f"- {note}" for note in inference_notes) + "\n\n"
             response += generate_completion_message(state.params, state.user_provided_keys)
         else:
-            extracted_multiple = result.get("extracted_multiple") or {}
-            extracted_units = result.get("extracted_units") or {}
             updates: Dict[str, object] = {}
             explicit_keys = set()
             default_applied_keys = set()
@@ -326,8 +408,6 @@ def chat(req: ChatRequest) -> ChatResponse:
                             updates[key] = normalized_cases
                             explicit_keys.add(key)
 
-            single_value = result.get("understood_value")
-            single_key = result.get("parameter_key") or state.current_asking
             if isinstance(single_value, (int, float)) and single_key in PARAM_ORDER:
                 updates[single_key] = float(single_value)
                 explicit_keys.add(single_key)
@@ -345,8 +425,9 @@ def chat(req: ChatRequest) -> ChatResponse:
 
             if result.get("use_default") and state.current_asking in PARAM_ORDER:
                 key = state.current_asking
-                updates[key] = get_default_value(key)
-                default_applied_keys.add(key)
+                if key not in updates:
+                    updates[key] = get_default_value(key)
+                    default_applied_keys.add(key)
 
             tentative = dict(state.params)
             applied: List[str] = []

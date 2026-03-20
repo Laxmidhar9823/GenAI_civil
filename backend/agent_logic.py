@@ -355,12 +355,18 @@ def infer_semantic_choices(user_input: str, current_asking: Optional[str] = None
     load_loc = normalize_load_location(user_input)
     if load_loc:
         extracted[LOAD_LOCATION_KEY] = load_loc
+    elif re.search(r"\bboth\s+at\s+interior\b|\bat\s+interior\b", lowered):
+        extracted[LOAD_LOCATION_KEY] = "interior"
+    elif re.search(r"\bboth\s+at\s+edge\b|\bat\s+edge\b|\bedge\s+loading\b", lowered):
+        extracted[LOAD_LOCATION_KEY] = "edge"
+    elif re.search(r"\bboth\s+at\s+corner\b|\bat\s+corner\b|\bcorner\s+loading\b", lowered):
+        extracted[LOAD_LOCATION_KEY] = "corner"
     elif "corner" in lowered:
         extracted[LOAD_LOCATION_KEY] = "corner"
-    elif "edge" in lowered:
-        extracted[LOAD_LOCATION_KEY] = "edge"
     elif any(word in lowered for word in ["interior", "inside", "middle", "center", "centre"]):
         extracted[LOAD_LOCATION_KEY] = "interior"
+    elif "edge" in lowered:
+        extracted[LOAD_LOCATION_KEY] = "edge"
 
     if current_asking == MESH_TYPE_KEY and MESH_TYPE_KEY not in extracted:
         keyed = normalize_mesh_type(user_input)
@@ -436,12 +442,14 @@ def infer_load_patch_from_contact_area(
     b: float,
     contact_lx_mm: float,
     contact_ly_mm: float,
+    context_text: Optional[str] = None,
 ) -> Dict[str, float]:
     location = normalize_load_location(load_location) or "interior"
     slab_a = float(a)
     slab_b = float(b)
     lx = max(1.0, float(contact_lx_mm))
     ly = max(1.0, float(contact_ly_mm))
+    lowered = (context_text or "").lower()
 
     if location == "corner":
         return {
@@ -452,7 +460,41 @@ def infer_load_patch_from_contact_area(
         }
 
     if location == "edge":
-        x1 = max(0.0, (slab_a - lx) / 2.0)
+        if "right edge" in lowered or "at right edge" in lowered or "on right edge" in lowered:
+            y_center = slab_b / 2.0
+            y1 = max(0.0, y_center - (ly / 2.0))
+            y2 = min(slab_b, y_center + (ly / 2.0))
+            return {
+                "x1": round(max(0.0, slab_a - lx), 3),
+                "x2": round(slab_a, 3),
+                "y1": round(y1, 3),
+                "y2": round(y2, 3),
+            }
+
+        if "left edge" in lowered or "at left edge" in lowered or "on left edge" in lowered:
+            y_center = slab_b / 2.0
+            y1 = max(0.0, y_center - (ly / 2.0))
+            y2 = min(slab_b, y_center + (ly / 2.0))
+            return {
+                "x1": 0.0,
+                "x2": round(min(slab_a, lx), 3),
+                "y1": round(y1, 3),
+                "y2": round(y2, 3),
+            }
+
+        if "top edge" in lowered or "at top edge" in lowered or "on top edge" in lowered:
+            x_center = slab_a / 2.0
+            x1 = max(0.0, x_center - (lx / 2.0))
+            x2 = min(slab_a, x_center + (lx / 2.0))
+            return {
+                "x1": round(x1, 3),
+                "x2": round(x2, 3),
+                "y1": round(max(0.0, slab_b - ly), 3),
+                "y2": round(slab_b, 3),
+            }
+
+        x_center = slab_a / 2.0
+        x1 = max(0.0, x_center - (lx / 2.0))
         return {
             "x1": round(x1, 3),
             "x2": round(min(slab_a, x1 + lx), 3),
@@ -503,6 +545,263 @@ def _offset_load_patch(
         return {"x1": x1, "x2": x2, "y1": round(y1 - spacing, 3), "y2": round(y2 - spacing, 3)}
 
     return {"x1": x1, "x2": x2, "y1": y1, "y2": y2}
+
+
+def _detect_number_of_wheels(text: str) -> int:
+    lowered = text.lower()
+    if re.search(r"\btridem\b|\bthree\s*wheels\b|\b3\s*wheels\b", lowered):
+        return 3
+    if re.search(r"\btandem\s*axle\b|\btandem\b|\bdual\s*wheel\b|\btwo\s*wheels\b|\b2\s*wheels\b", lowered):
+        return 2
+    return 1
+
+
+def _extract_edge_distances_mm(text: str) -> Dict[str, float]:
+    distances: Dict[str, float] = {}
+    pattern = re.compile(
+        r"(\d+(?:\.\d+)?)\s*(mm|cm|m|meter|meters)\s*from\s*(left|right|top|bottom)\s*edge"
+    )
+    for match in pattern.finditer(text):
+        value_mm = _length_to_mm(float(match.group(1)), match.group(2))
+        side = match.group(3).lower()
+        distances[side] = value_mm
+    return distances
+
+
+def _center_to_patch(center_x: float, center_y: float, contact_lx_mm: float, contact_ly_mm: float) -> Dict[str, float]:
+    half_x = float(contact_lx_mm) / 2.0
+    half_y = float(contact_ly_mm) / 2.0
+    return {
+        "x1": round(center_x - half_x, 3),
+        "x2": round(center_x + half_x, 3),
+        "y1": round(center_y - half_y, 3),
+        "y2": round(center_y + half_y, 3),
+    }
+
+
+def _nearest_mesh_point(value: float, nodes: List[float]) -> float:
+    if not nodes:
+        return float(value)
+    return float(min(nodes, key=lambda node: abs(float(node) - float(value))))
+
+
+def _build_group_wheel_load_cases(
+    number_of_wheels: int,
+    spacing_mm: float,
+    slab_a: float,
+    slab_b: float,
+    contact_lx_mm: float,
+    contact_ly_mm: float,
+    load_location: str,
+    text: str,
+    q_value: float,
+    mesh_type: str,
+) -> List[Dict[str, float]]:
+    location = normalize_load_location(load_location) or "interior"
+    distances = _extract_edge_distances_mm(text)
+    edge_lock_x = False
+    edge_lock_y = False
+
+    cx = slab_a / 2.0
+    cy = slab_b / 2.0
+
+    if "left" in distances:
+        cx = distances["left"]
+    if "right" in distances:
+        cx = slab_a - distances["right"]
+    if "bottom" in distances:
+        cy = distances["bottom"]
+    if "top" in distances:
+        cy = slab_b - distances["top"]
+
+    explicit_x_distance = "left" in distances or "right" in distances
+    explicit_y_distance = "bottom" in distances or "top" in distances
+
+    if location == "edge":
+        if "bottom" in text and "bottom" not in distances:
+            cy = contact_ly_mm / 2.0
+            edge_lock_y = True
+        elif "top" in text and "top" not in distances:
+            cy = slab_b - (contact_ly_mm / 2.0)
+            edge_lock_y = True
+        elif "left" in text and "left" not in distances:
+            cx = contact_lx_mm / 2.0
+            edge_lock_x = True
+        elif "right" in text and "right" not in distances:
+            cx = slab_a - (contact_lx_mm / 2.0)
+            edge_lock_x = True
+        elif all(side not in text for side in ["top", "bottom", "left", "right"]):
+            cy = contact_ly_mm / 2.0
+            edge_lock_y = True
+
+    if location == "corner":
+        if "top" in text and "right" in text:
+            cx = slab_a - (contact_lx_mm / 2.0)
+            cy = slab_b - (contact_ly_mm / 2.0)
+        elif "top" in text:
+            cx = contact_lx_mm / 2.0
+            cy = slab_b - (contact_ly_mm / 2.0)
+        elif "right" in text:
+            cx = slab_a - (contact_lx_mm / 2.0)
+            cy = contact_ly_mm / 2.0
+        else:
+            cx = contact_lx_mm / 2.0
+            cy = contact_ly_mm / 2.0
+
+    axis = "y"
+    if any(k in distances for k in ["left", "right"]) or ("left edge" in text or "right edge" in text):
+        axis = "y"
+    elif any(k in distances for k in ["top", "bottom"]) or ("top edge" in text or "bottom edge" in text):
+        axis = "x"
+    elif location == "edge":
+        axis = "x"
+
+    level = normalize_mesh_type(mesh_type) or "coarse"
+    elements = max(1, int(MESH_LEVEL_ELEMENTS.get(level, MESH_LEVEL_ELEMENTS["coarse"])))
+    mesh_dx = float(slab_a) / elements
+    mesh_dy = float(slab_b) / elements
+
+    contact_x = float(contact_lx_mm)
+    contact_y = float(contact_ly_mm)
+    if level == "fine":
+        # Fine mesh guardrail: contact patch should be at least one mesh step.
+        contact_x = max(contact_x, mesh_dx)
+        contact_y = max(contact_y, mesh_dy)
+
+    half_x = contact_x / 2.0
+    half_y = contact_y / 2.0
+
+    wheels = max(1, int(number_of_wheels))
+    spacing = max(0.0, float(spacing_mm))
+    offsets = [((i - (wheels - 1) / 2.0) * spacing) for i in range(wheels)]
+
+    # Corner boundary condition takes highest priority over mesh alignment.
+    # For corner loading, keep first wheel exactly touching both edges.
+    if location == "corner":
+        first_cx = half_x
+        first_cy = half_y
+
+        if wheels == 1:
+            patch = _center_to_patch(first_cx, first_cy, contact_x, contact_y)
+            return [
+                {
+                    "x1": float(patch["x1"]),
+                    "x2": float(patch["x2"]),
+                    "y1": float(patch["y1"]),
+                    "y2": float(patch["y2"]),
+                    "q": float(q_value),
+                }
+            ]
+
+        centers: List[Tuple[float, float]] = [(first_cx, first_cy)]
+
+        # Dual/tridem extension from first wheel uses center spacing (not rectangle spacing).
+        # Prefer x-direction first; if not feasible, extend in y-direction.
+        def _can_place_x(index: int) -> bool:
+            cx_try = first_cx + (index * spacing)
+            return (cx_try + half_x) <= slab_a
+
+        def _can_place_y(index: int) -> bool:
+            cy_try = first_cy + (index * spacing)
+            return (cy_try + half_y) <= slab_b
+
+        use_x_axis = _can_place_x(wheels - 1)
+        if not use_x_axis and not _can_place_y(wheels - 1):
+            # If spacing is too large for both directions, place as far as possible in x while
+            # preserving first wheel boundary condition.
+            use_x_axis = True
+
+        for i in range(1, wheels):
+            if use_x_axis:
+                cx_i = first_cx + (i * spacing)
+                cx_i = min(max(cx_i, half_x), slab_a - half_x)
+                centers.append((cx_i, first_cy))
+            else:
+                cy_i = first_cy + (i * spacing)
+                cy_i = min(max(cy_i, half_y), slab_b - half_y)
+                centers.append((first_cx, cy_i))
+
+        load_cases: List[Dict[str, float]] = []
+        for cxi, cyi in centers:
+            patch = _center_to_patch(cxi, cyi, contact_x, contact_y)
+            load_cases.append(
+                {
+                    "x1": float(patch["x1"]),
+                    "x2": float(patch["x2"]),
+                    "y1": float(patch["y1"]),
+                    "y2": float(patch["y2"]),
+                    "q": float(q_value),
+                }
+            )
+        return load_cases
+
+    # Preserve spacing exactly by constraining and snapping only the group center.
+    if axis == "x":
+        min_off = min(offsets)
+        max_off = max(offsets)
+        min_cx = half_x - min_off
+        max_cx = slab_a - half_x - max_off
+        min_cy = half_y
+        max_cy = slab_b - half_y
+    else:
+        min_off = min(offsets)
+        max_off = max(offsets)
+        min_cx = half_x
+        max_cx = slab_a - half_x
+        min_cy = half_y - min_off
+        max_cy = slab_b - half_y - max_off
+
+    # If spacing is too large for slab, collapse to nearest feasible center while keeping wheel offsets fixed.
+    if min_cx > max_cx:
+        mid = slab_a / 2.0
+        min_cx = mid
+        max_cx = mid
+    if min_cy > max_cy:
+        mid = slab_b / 2.0
+        min_cy = mid
+        max_cy = mid
+
+    cx = min(max(cx, min_cx), max_cx)
+    cy = min(max(cy, min_cy), max_cy)
+
+    x_nodes = _linspace_nodes(slab_a, elements)
+    y_nodes = _linspace_nodes(slab_b, elements)
+    snapped_cx = _nearest_mesh_point(cx, x_nodes)
+    snapped_cy = _nearest_mesh_point(cy, y_nodes)
+
+    # Preserve user-specified interior distances first; only snap if mesh deviation is small.
+    if explicit_x_distance and abs(snapped_cx - cx) >= (mesh_dx / 2.0):
+        snapped_cx = cx
+    if explicit_y_distance and abs(snapped_cy - cy) >= (mesh_dy / 2.0):
+        snapped_cy = cy
+
+    # Boundary condition priority: edge-constrained axis should not move to mesh nodes.
+    if edge_lock_x:
+        snapped_cx = cx
+    if edge_lock_y:
+        snapped_cy = cy
+
+    # Keep spacing priority: after snap, shift center only as needed to remain inside boundaries.
+    cx = min(max(snapped_cx, min_cx), max_cx)
+    cy = min(max(snapped_cy, min_cy), max_cy)
+
+    load_cases: List[Dict[str, float]] = []
+    for offset in offsets:
+        wheel_cx = cx + offset if axis == "x" else cx
+        wheel_cy = cy + offset if axis == "y" else cy
+
+        patch = _center_to_patch(wheel_cx, wheel_cy, contact_x, contact_y)
+        load_cases.append(
+            {
+                "x1": float(patch["x1"]),
+                "x2": float(patch["x2"]),
+                "y1": float(patch["y1"]),
+                "y2": float(patch["y2"]),
+                "q": float(q_value),
+            }
+        )
+
+    return load_cases
 
 
 def apply_implicit_inferences(params: Dict[str, Any], user_provided_keys: List[str]) -> Tuple[List[str], List[str]]:
@@ -884,8 +1183,8 @@ def _extract_engineering_candidates(text: str) -> Tuple[Dict[str, Any], Dict[str
 
     # Capture slab dimensions like "5m x 5m" and prefer lines that mention slab/dimensions.
     dim_patterns = [
-        r"(?:slab\s*(?:dimensions?|size)?|dimensions?)\s*[:=-]?\s*(\d+(?:\.\d+)?)\s*(mm|cm|m|meter|meters)?\s*[x×]\s*(\d+(?:\.\d+)?)\s*(mm|cm|m|meter|meters)?",
-        r"\b(\d+(?:\.\d+)?)\s*(mm|cm|m|meter|meters)\s*[x×]\s*(\d+(?:\.\d+)?)\s*(mm|cm|m|meter|meters)\b",
+        r"(?:slab\s*(?:dimensions?|size)?|dimensions?)\s*[:=-]?\s*(\d+(?:\.\d+)?)\s*(mm|cm|m|meter|meters)?(?:\s*\([^)]*\))?\s*[x×]\s*(\d+(?:\.\d+)?)\s*(mm|cm|m|meter|meters)?(?:\s*\([^)]*\))?",
+        r"\b(\d+(?:\.\d+)?)\s*(mm|cm|m|meter|meters)\s*(?:\([^)]*\))?\s*[x×]\s*(\d+(?:\.\d+)?)\s*(mm|cm|m|meter|meters)\s*(?:\([^)]*\))?\b",
     ]
     for pattern in dim_patterns:
         dim_match = re.search(pattern, lowered)
@@ -900,6 +1199,11 @@ def _extract_engineering_candidates(text: str) -> Tuple[Dict[str, Any], Dict[str
         r"(?:slab\s*)?thickness\s*[:=-]?\s*(\d+(?:\.\d+)?)\s*(mm|cm|m|meter|meters)?",
         lowered,
     )
+    if not thickness_match:
+        thickness_match = re.search(
+            r"(\d+(?:\.\d+)?)\s*(mm|cm|m|meter|meters)\s*(?:thick|thickness)\b",
+            lowered,
+        )
     if thickness_match:
         out["t"] = round(_length_to_mm(float(thickness_match.group(1)), thickness_match.group(2)), 3)
 
@@ -944,18 +1248,28 @@ def _extract_engineering_candidates(text: str) -> Tuple[Dict[str, Any], Dict[str
             out["Ky"] = k_val
             out["Kz"] = k_val
 
+    # Explicit phrase-based override for horizontal subgrade resistance.
+    if re.search(r"no\s+horizontal\s+resistance|without\s+horizontal\s+resistance|horizontal\s+resistance\s*(?:is\s*)?0", lowered):
+        out["Kx"] = 0.0
+        out["Ky"] = 0.0
+
     for key in ["Kx", "Ky", "Kz"]:
         direct_match = re.search(rf"\b{key.lower()}\b\s*[:=-]?\s*(\d+(?:\.\d+)?)", lowered)
         if direct_match:
             out[key] = float(direct_match.group(1))
 
-    load_match = re.search(r"(?:wheel\s*)?load\s*[^\d]{0,20}(\d+(?:\.\d+)?)\s*(kn|n)", lowered)
+    load_match = re.search(
+        r"(?:each\s*wheel|per\s*wheel|wheel\s*load|(?:wheel\s*)?load)\s*[:=-]?\s*[^\d]{0,20}(\d+(?:\.\d+)?)\s*(kn|n)",
+        lowered,
+    )
 
     area_match: Optional[re.Match[str]] = None
     area_patterns = [
         r"(?:load\s*)?(?:tire|tyre)?\s*contact\s*(?:area|patch)?\s*[:=-]?\s*(\d+(?:\.\d+)?)\s*(mm|cm|m|meter|meters)?\s*[x×]\s*(\d+(?:\.\d+)?)\s*(mm|cm|m|meter|meters)?",
         r"(?:contact\s*(?:area|patch)?\s*(?:of|is|=|:)?\s*)(\d+(?:\.\d+)?)\s*(mm|cm|m|meter|meters)?\s*[x×]\s*(\d+(?:\.\d+)?)\s*(mm|cm|m|meter|meters)?",
         r"(\d+(?:\.\d+)?)\s*(mm|cm|m|meter|meters)?\s*[x×]\s*(\d+(?:\.\d+)?)\s*(mm|cm|m|meter|meters)?\s*(?:contact|contact\s*area|contact\s*patch|tire\s*contact|tyre\s*contact)",
+        r"(?:each\s*wheel|per\s*wheel|wheel\s*load|(?:wheel\s*)?load)[^.\n;]*?\bover\s*(\d+(?:\.\d+)?)\s*(mm|cm|m|meter|meters)?\s*[x×]\s*(\d+(?:\.\d+)?)\s*(mm|cm|m|meter|meters)?",
+        r"\bover\s*(\d+(?:\.\d+)?)\s*(mm|cm|m|meter|meters)?\s*[x×]\s*(\d+(?:\.\d+)?)\s*(mm|cm|m|meter|meters)?",
     ]
     for pattern in area_patterns:
         candidate = re.search(pattern, lowered)
@@ -973,6 +1287,7 @@ def _extract_engineering_candidates(text: str) -> Tuple[Dict[str, Any], Dict[str
     tandem_requested = bool(
         re.search(r"\btandem\s*axle\b|\btandem\b|\bdual\s*wheel\b|\bdouble\s*wheel\b", lowered)
     )
+    number_of_wheels = _detect_number_of_wheels(lowered)
 
     inferred_location = infer_semantic_choices(text).get(LOAD_LOCATION_KEY)
     slab_a = float(out["a"]) if "a" in out else float(DEFAULT_VALUES["a"])
@@ -990,7 +1305,14 @@ def _extract_engineering_candidates(text: str) -> Tuple[Dict[str, Any], Dict[str
             load_n = load_value * 1000.0 if load_unit == "kn" else load_value
             area_mm2 = max(area_lx_mm * area_ly_mm, 1e-9)
             q_val = round(load_n / area_mm2, 5)
-            patch = infer_load_patch_from_contact_area(location, slab_a, slab_b, area_lx_mm, area_ly_mm)
+            patch = infer_load_patch_from_contact_area(
+                location,
+                slab_a,
+                slab_b,
+                area_lx_mm,
+                area_ly_mm,
+                lowered,
+            )
             load_cases.append(
                 {
                     "x1": float(patch["x1"]),
@@ -1000,6 +1322,30 @@ def _extract_engineering_candidates(text: str) -> Tuple[Dict[str, Any], Dict[str
                     "q": float(q_val),
                 }
             )
+
+    # Multi-wheel groups (tandem, tridem, dual) should be decomposed around axle/group center.
+    if number_of_wheels > 1 and load_match and area_lx_mm is not None and area_ly_mm is not None:
+        load_value = float(load_match.group(1))
+        load_unit = (load_match.group(2) or "n").lower()
+        load_n = load_value * 1000.0 if load_unit == "kn" else load_value
+        area_mm2 = max(area_lx_mm * area_ly_mm, 1e-9)
+        q_val = round(load_n / area_mm2, 5)
+
+        group_location = inferred_location or (normalize_load_location(out.get("load_location")) if isinstance(out.get("load_location"), str) else None) or "interior"
+        spacing_for_group = spacing_mm if isinstance(spacing_mm, (int, float)) else float(area_lx_mm)
+        mesh_for_group = infer_semantic_choices(text).get(MESH_TYPE_KEY) or (str(out.get(MESH_TYPE_KEY)) if MESH_TYPE_KEY in out else "coarse")
+        load_cases = _build_group_wheel_load_cases(
+            number_of_wheels=number_of_wheels,
+            spacing_mm=float(spacing_for_group),
+            slab_a=slab_a,
+            slab_b=slab_b,
+            contact_lx_mm=float(area_lx_mm),
+            contact_ly_mm=float(area_ly_mm),
+            load_location=group_location,
+            text=lowered,
+            q_value=float(q_val),
+            mesh_type=mesh_for_group,
+        )
 
     if load_cases:
         out["load_cases"] = load_cases
@@ -1011,7 +1357,14 @@ def _extract_engineering_candidates(text: str) -> Tuple[Dict[str, Any], Dict[str
         area_mm2 = max(area_lx_mm * area_ly_mm, 1e-9)
         q_val = round(load_n / area_mm2, 5)
 
-        base_patch = infer_load_patch_from_contact_area(inferred_location, slab_a, slab_b, area_lx_mm, area_ly_mm)
+        base_patch = infer_load_patch_from_contact_area(
+            inferred_location,
+            slab_a,
+            slab_b,
+            area_lx_mm,
+            area_ly_mm,
+            lowered,
+        )
         second_patch = _offset_load_patch(
             base_patch,
             spacing_mm if isinstance(spacing_mm, (int, float)) else float(area_lx_mm),
@@ -1037,7 +1390,14 @@ def _extract_engineering_candidates(text: str) -> Tuple[Dict[str, Any], Dict[str
         out["load_cases"] = load_cases
         out.update(load_cases[0])
     elif inferred_location and area_lx_mm is not None and area_ly_mm is not None:
-        patch = infer_load_patch_from_contact_area(inferred_location, slab_a, slab_b, area_lx_mm, area_ly_mm)
+        patch = infer_load_patch_from_contact_area(
+            inferred_location,
+            slab_a,
+            slab_b,
+            area_lx_mm,
+            area_ly_mm,
+            lowered,
+        )
         out.update(patch)
 
     explicit_q = re.search(r"(?:pressure|\bq\b)\s*[:=-]?\s*(\d+(?:\.\d+)?)\s*(mpa|kpa|psi)?", lowered)

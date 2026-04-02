@@ -16,6 +16,9 @@ export default function AssistantPage() {
   const [state, setState] = useState<ConversationState | null>(null)
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [finalParamsFromResponse, setFinalParamsFromResponse] = useState<Record<string, unknown> | null>(null)
+  // When a configuration is complete, require the user to review/confirm before exporting.
+  // This adds an edit/update step without changing backend business logic.
+  const [finalConfirmed, setFinalConfirmed] = useState(false)
   const [busy, setBusy] = useState(false)
   const [, setSchemaBusy] = useState(false)
   const [, setHealthBusy] = useState(false)
@@ -83,6 +86,7 @@ export default function AssistantPage() {
     setError(null)
     setBusy(true)
     setFinalParamsFromResponse(null)
+    setFinalConfirmed(false)
 
     try {
       const resp = await apiReset()
@@ -169,6 +173,9 @@ export default function AssistantPage() {
   const handleSend = async (text: string) => {
     setBusy(true)
     setError(null)
+    setFinalParamsFromResponse(null)
+    // Any new message (including edits) invalidates prior confirmation.
+    setFinalConfirmed(false)
 
     // Optimistic user message
     const userMsg: ChatMessage = { id: newId(), role: 'user', content: text }
@@ -199,9 +206,8 @@ export default function AssistantPage() {
         }
       }
 
-      if (resp.final_params) {
-        setFinalParamsFromResponse(resp.final_params)
-      }
+      const latestFinalParams = resp.final_params ?? extractFinalParams(resp.state, null)
+      setFinalParamsFromResponse(latestFinalParams ?? null)
     } catch (e) {
       setError((e as Error).message)
     } finally {
@@ -244,6 +250,14 @@ export default function AssistantPage() {
           paramInfo={paramInfo}
           collected={collected}
           finalParams={finalParams}
+          busy={busy}
+          finalConfirmed={finalConfirmed}
+          onConfirmFinal={() => setFinalConfirmed(true)}
+          onEditParam={async (key, value) => {
+            // Route edits through the existing /chat logic (LLM extraction + validation)
+            // so we don't duplicate rules in the frontend.
+            await handleSend(`Update ${key} to ${value}`)
+          }}
        />
     </div>
   )

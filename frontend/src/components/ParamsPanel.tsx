@@ -1,4 +1,4 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 
 const HIDDEN_COLLECTED_KEYS = new Set(['mesh_type', 'load_location'])
 
@@ -41,8 +41,21 @@ export default function ParamsPanel(props: {
   paramInfo: Record<string, any> | null
   collected: Record<string, unknown> | null
   finalParams: Record<string, unknown> | null
+  busy: boolean
+  // When true, export buttons are enabled.
+  finalConfirmed: boolean
+  onConfirmFinal: () => void
+  // Edits are applied by the parent using the existing /chat endpoint.
+  onEditParam: (key: string, value: string) => Promise<void> | void
 }) {
-  const { progress, paramInfo, collected, finalParams } = props
+  const { progress, paramInfo, collected, finalParams, busy, finalConfirmed, onConfirmFinal, onEditParam } = props
+
+  // Local UI state for single-field edit workflow.
+  const [editOpen, setEditOpen] = useState(false)
+  const [editKey, setEditKey] = useState('')
+  const [editValue, setEditValue] = useState('')
+  const [editError, setEditError] = useState<string | null>(null)
+  const [saving, setSaving] = useState(false)
 
   const keys = useMemo(() => {
     if (paramInfo) {
@@ -53,6 +66,76 @@ export default function ParamsPanel(props: {
     }
     return []
   }, [paramInfo, collected])
+
+  const editKeys = useMemo(() => {
+    const s = new Set<string>()
+    if (collected) {
+      for (const k of Object.keys(collected)) s.add(k)
+    }
+    if (paramInfo) {
+      for (const k of Object.keys(paramInfo)) s.add(k)
+    }
+    return [...s].sort((a, b) => a.localeCompare(b))
+  }, [collected, paramInfo])
+
+  const reviewRows = useMemo(() => {
+    if (!collected) return []
+    const allKeys = Object.keys(collected).sort((a, b) => a.localeCompare(b))
+    return allKeys.map((k) => {
+      const meta = paramInfo?.[k]
+      const mainLabel = meta?.name || meta?.technical_name || k
+      return { key: k, mainLabel, value: collected[k] }
+    })
+  }, [collected, paramInfo])
+
+  function isNumericKey(key: string): boolean {
+    if (key === 'mesh_type' || key === 'load_location') return false
+    if (key === 'x' || key === 'y') return false
+    return true
+  }
+
+  function validateEditInput(key: string, raw: string): string | null {
+    const trimmedKey = key.trim()
+    const trimmedValue = raw.trim()
+    if (!trimmedKey) return 'Choose a field to edit.'
+    if (!trimmedValue) return 'Enter a value.'
+
+    if (trimmedKey === 'mesh_type') {
+      const v = trimmedValue.toLowerCase()
+      if (!['coarse', 'medium', 'fine'].includes(v)) return "Mesh type must be: coarse, medium, or fine."
+      return null
+    }
+
+    if (trimmedKey === 'load_location') {
+      const v = trimmedValue.toLowerCase()
+      if (!['corner', 'edge', 'interior'].includes(v)) return "Load location must be: corner, edge, or interior."
+      return null
+    }
+
+    if (trimmedKey === 'x' || trimmedKey === 'y') {
+      // Expect a JSON array of numbers, e.g. [0, 350, 700, 3500]
+      try {
+        const parsed = JSON.parse(trimmedValue)
+        if (!Array.isArray(parsed) || parsed.length < 2) return 'Enter at least two numeric coordinates.'
+        const nums = parsed.map((n) => (typeof n === 'number' ? n : Number(n)))
+        if (nums.some((n) => !Number.isFinite(n))) return 'All coordinates must be numeric.'
+        if (nums.some((n) => n < 0)) return 'Coordinates cannot be negative.'
+        for (let i = 1; i < nums.length; i++) {
+          if (nums[i] <= nums[i - 1]) return 'Coordinates must be in strictly increasing order.'
+        }
+        return null
+      } catch {
+        return 'Enter coordinates as a JSON array, e.g. [0, 350, 700, 3500].'
+      }
+    }
+
+    if (isNumericKey(trimmedKey)) {
+      const n = Number(trimmedValue)
+      if (!Number.isFinite(n)) return 'Enter a numeric value.'
+    }
+
+    return null
+  }
 
   const rows = useMemo(() => {
     if (!keys.length) return []
@@ -130,7 +213,187 @@ export default function ParamsPanel(props: {
         </div>
       </div>
 
+      {/*
+        Review + edit step:
+        - Shows a full summary of collected values (including normally hidden keys)
+        - Allows editing a single field and re-validates via existing backend chat logic
+        - Requires confirmation before enabling export (prevents exporting without review)
+      */}
       {finalParams && (
+        <div style={{ marginTop: '24px' }}>
+          <div className="card">
+            <div className="card-header">
+              <h3>Review Before Export</h3>
+            </div>
+            <div className="card-body">
+              <div className="sub" style={{ marginBottom: '12px' }}>
+                Review the values below. Choose “Edit values” to correct one field, or “Continue with current values” to enable export.
+              </div>
+
+              {reviewRows.length ? (
+                <div className="table-wrap" style={{ marginBottom: '12px' }}>
+                  <table className="table">
+                    <thead>
+                      <tr>
+                        <th style={{ width: '50%' }}>Parameter</th>
+                        <th>Value</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {reviewRows.map((r) => (
+                        <tr key={r.key}>
+                          <td>
+                            <div className="param-label-wrap">
+                              <span className="param-symbol" title={`Symbol: ${r.key}`}>{r.key}</span>
+                              <span className="param-main-label">{r.mainLabel}</span>
+                            </div>
+                          </td>
+                          <td>
+                            {r.value === undefined || r.value === null || String(r.value) === '' ? (
+                              <span className="sub" style={{ opacity: 0.5 }}>—</span>
+                            ) : (
+                              <span style={{ fontWeight: 500 }}>
+                                {typeof r.value === 'object' && r.value !== null ? JSON.stringify(r.value) : String(r.value)}
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <div className="sub" style={{ marginBottom: '12px' }}>No collected parameters found.</div>
+              )}
+
+              <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+                <button
+                  className="btn"
+                  onClick={() => {
+                    setEditError(null)
+                    setEditOpen((v) => !v)
+                    if (!editKey && editKeys.length) {
+                      setEditKey(editKeys[0])
+                    }
+                  }}
+                  disabled={busy}
+                >
+                  {editOpen ? 'Close edit' : 'Edit values'}
+                </button>
+
+                <button
+                  className="btn primary"
+                  onClick={() => {
+                    setEditError(null)
+                    setEditOpen(false)
+                    onConfirmFinal()
+                  }}
+                  disabled={busy}
+                >
+                  Continue with current values
+                </button>
+              </div>
+
+              {!finalConfirmed && (
+                <div className="status-detail warning" style={{ marginTop: '12px' }}>
+                  Export is disabled until you confirm.
+                </div>
+              )}
+
+              {editOpen && (
+                <div style={{ marginTop: '14px' }}>
+                  <div className="sub" style={{ marginBottom: '10px' }}>
+                    Edit one field (only that value will be requested again).
+                  </div>
+
+                  <div className="input-group" style={{ display: 'grid', gridTemplateColumns: '1fr', gap: '10px' }}>
+                    <div>
+                      <label className="sub" style={{ display: 'block', marginBottom: '6px' }}>Field</label>
+                      <select
+                        className="chat-input"
+                        value={editKey}
+                        onChange={(e) => {
+                          setEditError(null)
+                          setEditKey(e.target.value)
+                        }}
+                        disabled={busy || saving}
+                      >
+                        {editKeys.map((k) => (
+                          <option key={k} value={k}>{k}</option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="sub" style={{ display: 'block', marginBottom: '6px' }}>New value</label>
+                      <input
+                        className="chat-input"
+                        value={editValue}
+                        onChange={(e) => {
+                          setEditError(null)
+                          setEditValue(e.target.value)
+                        }}
+                        placeholder={editKey === 'x' || editKey === 'y' ? '[0, 350, 700, 3500]' : 'Enter value'}
+                        disabled={busy || saving}
+                        autoComplete="off"
+                      />
+                    </div>
+                  </div>
+
+                  {editError && (
+                    <div className="status-detail warning" style={{ marginTop: '10px' }}>
+                      {editError}
+                    </div>
+                  )}
+
+                  <div style={{ display: 'flex', gap: '10px', marginTop: '12px' }}>
+                    <button
+                      className="btn"
+                      disabled={busy || saving}
+                      onClick={() => {
+                        setEditError(null)
+                        setEditOpen(false)
+                        setEditValue('')
+                      }}
+                    >
+                      Cancel
+                    </button>
+
+                    <button
+                      className="btn primary"
+                      disabled={busy || saving}
+                      onClick={async () => {
+                        const err = validateEditInput(editKey, editValue)
+                        if (err) {
+                          setEditError(err)
+                          return
+                        }
+
+                        setSaving(true)
+                        setEditError(null)
+                        try {
+                          // Apply update through parent callback (chat endpoint); backend will do full validation.
+                          await Promise.resolve(onEditParam(editKey.trim(), editValue.trim()))
+                          setEditOpen(false)
+                          setEditValue('')
+                        } catch (e) {
+                          setEditError((e as Error).message)
+                        } finally {
+                          setSaving(false)
+                        }
+                      }}
+                    >
+                      Save update
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {finalParams && finalConfirmed && (
         <div style={{ marginTop: '24px' }}>
              <button 
                 className="btn primary" 

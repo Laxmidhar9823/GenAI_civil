@@ -272,7 +272,9 @@ def chat(req: ChatRequest) -> ChatResponse:
             )
 
         llm = get_ollama_llm(req.llm_config.ollama_url, effective_model, api_key=api_key)
-        result = process_user_input_with_llm(req.user_input, llm, context, state.current_asking)
+        result = process_user_input_with_llm(req.user_input, llm, context, state.params, state.current_asking)
+
+        conversation_only = bool(result.get("conversation_only"))
 
         extracted_multiple = result.get("extracted_multiple") or {}
         extracted_units = result.get("extracted_units") or {}
@@ -509,26 +511,33 @@ def chat(req: ChatRequest) -> ChatResponse:
 
                 response = "\n\n".join(p for p in parts if p)
 
-            bad = find_first_inconsistent_param(state.params)
-            if bad:
-                bad_key, bad_msg = bad
-                response = f"⚠️ One thing to fix before we continue: {bad_msg}\n\n"
-                response += (
-                    f"Please update **{PARAM_INFO[bad_key]['name']}**, or say "
-                    f"'default' to use **{format_value_with_unit(get_default_value(bad_key), bad_key)}**."
-                )
-                state.current_asking = bad_key
-                state.mode = "guided"
+            # If this turn was clearly conversational (e.g., "hi", "what is Kz?"),
+            # do NOT force the user into the guided data-entry flow.
+            if conversation_only and not applied and not applied_load_cases and not problems and not default_applied_keys:
+                if state.mode == "welcome":
+                    state.mode = "free"
+                # Keep current_asking as-is (if we were already in guided mode).
             else:
-                missing = [k for k in PARAM_ORDER if k not in state.params]
-                if missing:
-                    state.current_asking = missing[0]
+                bad = find_first_inconsistent_param(state.params)
+                if bad:
+                    bad_key, bad_msg = bad
+                    response = f"⚠️ One thing to fix before we continue: {bad_msg}\n\n"
+                    response += (
+                        f"Please update **{PARAM_INFO[bad_key]['name']}**, or say "
+                        f"'default' to use **{format_value_with_unit(get_default_value(bad_key), bad_key)}**."
+                    )
+                    state.current_asking = bad_key
                     state.mode = "guided"
-                    response = f"{response}\n\n{generate_interactive_followup(state.params)}".strip()
                 else:
-                    state.current_asking = None
-                    state.mode = "complete"
-                    response = f"{response}\n\n{generate_completion_message(state.params, state.user_provided_keys)}".strip()
+                    missing = [k for k in PARAM_ORDER if k not in state.params]
+                    if missing:
+                        state.current_asking = missing[0]
+                        state.mode = "guided"
+                        response = f"{response}\n\n{generate_interactive_followup(state.params)}".strip()
+                    else:
+                        state.current_asking = None
+                        state.mode = "complete"
+                        response = f"{response}\n\n{generate_completion_message(state.params, state.user_provided_keys)}".strip()
 
             if not response:
                 response = (

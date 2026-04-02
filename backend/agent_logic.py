@@ -249,6 +249,328 @@ MESH_LEVEL_ELEMENTS = {
 STANDARD_POISSON_RATIO = 0.18
 
 
+_GREETINGS = {
+    "hi",
+    "hello",
+    "hey",
+    "hii",
+    "hiii",
+    "good morning",
+    "good afternoon",
+    "good evening",
+}
+
+_THANKS = {
+    "thanks",
+    "thank you",
+    "thx",
+    "ty",
+    "appreciate it",
+}
+
+_GOODBYES = {
+    "bye",
+    "goodbye",
+    "see you",
+    "see ya",
+}
+
+_HELP_PATTERNS = {
+    "help",
+    "how do i use",
+    "how to use",
+    "what can you do",
+    "what do you do",
+    "commands",
+    "examples",
+    "sample",
+}
+
+_EXPLAIN_PATTERNS = {
+    "explain",
+    "meaning",
+    "what is",
+    "what's",
+    "define",
+    "units",
+    "unit",
+    "why",
+    "how",
+}
+
+
+def _normalize_text(text: str) -> str:
+    return " ".join((text or "").strip().lower().split())
+
+
+def _looks_like_greeting(text: str) -> bool:
+    normalized = _normalize_text(text)
+    if not normalized:
+        return False
+    if normalized in _GREETINGS:
+        return True
+    # Handle quick greeting followed by name etc.
+    first = normalized.split(" ", 1)[0]
+    return first in {"hi", "hello", "hey"} and len(normalized) <= 20
+
+
+def _looks_like_thanks(text: str) -> bool:
+    normalized = _normalize_text(text)
+    return any(phrase in normalized for phrase in _THANKS)
+
+
+def _looks_like_goodbye(text: str) -> bool:
+    normalized = _normalize_text(text)
+    return any(phrase in normalized for phrase in _GOODBYES)
+
+
+def _looks_like_help_request(text: str) -> bool:
+    normalized = _normalize_text(text)
+    return any(p in normalized for p in _HELP_PATTERNS)
+
+
+def _looks_like_explanation_request(text: str) -> bool:
+    normalized = _normalize_text(text)
+    if "?" in (text or ""):
+        return True
+    return any(p in normalized for p in _EXPLAIN_PATTERNS)
+
+
+def _extract_param_key_from_text(text: str) -> Optional[str]:
+    normalized = _normalize_text(text)
+    if not normalized:
+        return None
+
+    # Direct key mentions.
+    for key in PARAM_INFO.keys():
+        if f" {key.lower()} " in f" {normalized} ":
+            return key
+
+    # Common phrases.
+    if "poisson" in normalized or "poissons" in normalized:
+        return "nu"
+    if "mesh" in normalized:
+        return "mesh_type"
+    if "load location" in normalized or "loading location" in normalized or "where is the load" in normalized:
+        return "load_location"
+    if "thickness" in normalized or "thick" in normalized:
+        return "t"
+    if "length" in normalized and "slab" in normalized:
+        return "a"
+    if "width" in normalized and "slab" in normalized:
+        return "b"
+    if "pressure" in normalized or "contact pressure" in normalized:
+        return "q"
+    if "subgrade" in normalized or "foundation" in normalized:
+        # If user is generic, explain Kz first.
+        if "kx" in normalized:
+            return "Kx"
+        if "ky" in normalized:
+            return "Ky"
+        if "kz" in normalized:
+            return "Kz"
+        return "Kz"
+
+    # Alias matching.
+    for key, aliases in PARAM_ALIASES.items():
+        for alias in aliases:
+            if alias in normalized:
+                return key
+
+    # Name / technical name token matching.
+    for key, info in PARAM_INFO.items():
+        name = _normalize_text(str(info.get("name", "")))
+        tech = _normalize_text(str(info.get("technical_name", "")))
+        if name and name in normalized:
+            return key
+        if tech and tech in normalized:
+            return key
+    return None
+
+
+def _parameter_explanation(key: str) -> str:
+    info = PARAM_INFO.get(key)
+    if not info:
+        return ""
+
+    title = f"{info.get('icon', 'ℹ️')} **{info.get('name', key)}**"
+    tech = info.get("technical_name")
+    unit = info.get("unit")
+    pieces = [title]
+    if tech:
+        pieces.append(f"Technical name: {tech}")
+    if unit and unit != "(no unit)":
+        pieces.append(f"Unit: {unit}")
+    simple = info.get("simple_explanation")
+    if simple:
+        pieces.append(f"In simple words: {simple}")
+    typical = info.get("typical_range")
+    if typical:
+        pieces.append(f"Typical range: {typical}")
+    example = info.get("example")
+    if example:
+        pieces.append(f"Example: {example}")
+    pieces.append(f"Default we can use: {format_value_with_unit(get_default_value(key), key)}")
+    return "\n".join(pieces)
+
+
+def handle_conversational_intent(
+    user_input: str,
+    params: Dict[str, Any],
+    current_asking: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    """Deterministic conversation handler.
+
+    Returns a result dict matching process_user_input_with_llm output when the input
+    is clearly conversational (greeting/help/explain), so we don't depend on the LLM.
+    """
+
+    normalized = _normalize_text(user_input)
+    if not normalized:
+        return {
+            "understood_value": None,
+            "use_default": False,
+            "use_all_defaults": False,
+            "needs_clarification": False,
+            "friendly_response": "I’m here whenever you’re ready. Tell me about the slab and loading, or say ‘let’s begin’ for guided setup.",
+            "original_unit": None,
+            "parameter_key": current_asking,
+            "extracted_multiple": {},
+            "conversation_only": True,
+        }
+
+    if _looks_like_greeting(normalized):
+        msg = (
+            "Hi! I can help you set up a concrete slab / rigid pavement analysis. "
+            "If you describe your slab and loading in one message, I’ll extract the values.\n\n"
+            "Examples you can paste:\n"
+            "- ‘5m x 5m slab, 250mm thick, M30 concrete, K=60 MPa/m, 40 kN wheel load at edge, 200x300mm contact, mesh medium’\n"
+            "- Or say ‘let’s begin’ and I’ll guide you step-by-step."
+        )
+        return {
+            "understood_value": None,
+            "use_default": False,
+            "use_all_defaults": False,
+            "needs_clarification": False,
+            "friendly_response": msg,
+            "original_unit": None,
+            "parameter_key": current_asking,
+            "extracted_multiple": {},
+            "conversation_only": True,
+        }
+
+    if _looks_like_thanks(normalized):
+        return {
+            "understood_value": None,
+            "use_default": False,
+            "use_all_defaults": False,
+            "needs_clarification": False,
+            "friendly_response": "You’re welcome. If you want, share the slab dimensions + loading and I’ll take it from there.",
+            "original_unit": None,
+            "parameter_key": current_asking,
+            "extracted_multiple": {},
+            "conversation_only": True,
+        }
+
+    if _looks_like_goodbye(normalized):
+        return {
+            "understood_value": None,
+            "use_default": False,
+            "use_all_defaults": False,
+            "needs_clarification": False,
+            "friendly_response": "Bye! Come back anytime—just describe your slab and loading when you’re ready.",
+            "original_unit": None,
+            "parameter_key": current_asking,
+            "extracted_multiple": {},
+            "conversation_only": True,
+        }
+
+    if _looks_like_help_request(normalized):
+        return {
+            "understood_value": None,
+            "use_default": False,
+            "use_all_defaults": False,
+            "needs_clarification": False,
+            "friendly_response": (
+                "I can help with slab/pavement analysis inputs (dimensions, thickness, concrete grade, subgrade K, mesh, load location, wheel load/contact area).\n\n"
+                "You can either:\n"
+                "- Describe your case in plain text (best), or\n"
+                "- Say ‘let’s begin’ for a guided step-by-step flow, or\n"
+                "- Ask ‘explain Emod’ / ‘what is Kz?’ / ‘what does mesh mean?’ and I’ll explain." 
+            ),
+            "original_unit": None,
+            "parameter_key": current_asking,
+            "extracted_multiple": {},
+            "conversation_only": True,
+        }
+
+    # Parameter explanation / "what does X mean" type requests.
+    if _looks_like_explanation_request(user_input) and not re.search(r"\d", user_input or ""):
+        # If user asks "what is this" while we're prompting for a specific field, explain that field.
+        key = _extract_param_key_from_text(user_input) or current_asking
+        if key and key in PARAM_INFO:
+            follow = ""
+            if current_asking and key == current_asking:
+                follow = "\n\nWhen you’re ready, you can reply with a value (or say ‘default’)."
+            else:
+                follow = "\n\nIf you share your slab + loading details, I’ll capture the values for you."
+            return {
+                "understood_value": None,
+                "use_default": False,
+                "use_all_defaults": False,
+                "needs_clarification": False,
+                "friendly_response": f"{_parameter_explanation(key)}{follow}",
+                "original_unit": None,
+                "parameter_key": current_asking,
+                "extracted_multiple": {},
+                "conversation_only": True,
+            }
+
+        if any(phrase in normalized for phrase in {"parameters", "inputs", "what are the parameters", "what inputs"}):
+            categories = []
+            for category, keys in PARAM_CATEGORIES.items():
+                pretty = ", ".join(PARAM_INFO[k]["name"] for k in keys if k in PARAM_INFO)
+                categories.append(f"- {category}: {pretty}")
+            return {
+                "understood_value": None,
+                "use_default": False,
+                "use_all_defaults": False,
+                "needs_clarification": False,
+                "friendly_response": "Here are the main inputs I work with:\n" + "\n".join(categories),
+                "original_unit": None,
+                "parameter_key": current_asking,
+                "extracted_multiple": {},
+                "conversation_only": True,
+            }
+
+    # Polite refusal for clearly off-topic smalltalk.
+    if _looks_like_explanation_request(user_input) and any(
+        phrase in normalized
+        for phrase in {
+            "weather",
+            "time in",
+            "cricket score",
+            "stock",
+            "bitcoin",
+            "movie",
+            "song",
+        }
+    ):
+        return {
+            "understood_value": None,
+            "use_default": False,
+            "use_all_defaults": False,
+            "needs_clarification": False,
+            "friendly_response": "I can’t help with that topic, but I can help with slab/pavement analysis inputs and explanations. Tell me your slab size + loading, or ask what a parameter means.",
+            "original_unit": None,
+            "parameter_key": current_asking,
+            "extracted_multiple": {},
+            "conversation_only": True,
+        }
+
+    return None
+
+
 def get_default_value(key: str) -> Any:
     if key in NODE_PARAM_KEYS:
         return list(NODE_DEFAULT_VALUES[key])
@@ -1667,9 +1989,15 @@ def process_user_input_with_llm(
     user_input: str,
     llm: ChatOllama,
     context: str,
+    params: Optional[Dict[str, Any]] = None,
     current_asking: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Process user input through LLM for extraction and response generation."""
+
+    # First: deterministic conversation handling (greetings, help, explanations).
+    convo = handle_conversational_intent(user_input, params=params or {}, current_asking=current_asking)
+    if convo is not None:
+        return convo
 
     stripped_input = user_input.strip().lower()
 
@@ -1814,7 +2142,7 @@ def process_user_input_with_llm(
     except TimeoutError:
         return {
             "needs_clarification": True,
-            "friendly_response": "The model is taking too long to respond right now. Please try again, use 'let's begin' for guided mode, or provide multiple numeric values in one message.",
+            "friendly_response": "I’m having trouble reaching the model right now. If you share the key numbers (slab size, thickness, concrete grade, K value, wheel load/contact area), I can still capture them — or you can say ‘let’s begin’ for guided setup.",
         }
     except Exception as exc:
         err_text = str(exc).strip()

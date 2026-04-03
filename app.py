@@ -175,6 +175,26 @@ PARAM_INFO = {
     }
 }
 
+# =============================================================================
+# UI-ONLY DISPLAY LABEL OVERRIDES (do not change keys or logic)
+# =============================================================================
+
+DISPLAY_LABEL_OVERRIDES = {
+    "nu": "Poisson's Ratio (ν)",
+    "Emod": "Elastic Modulus (E)",
+    "Kx": "Soil Stiffness (Horizontal)",
+    "Ky": "Soil Stiffness (Transverse)",
+    "Kz": "Soil Stiffness (Vertical)",
+}
+
+
+def get_param_display_name(param_key: str) -> str:
+    """Return UI display label for a parameter key (UI-only)."""
+    if param_key in DISPLAY_LABEL_OVERRIDES:
+        return DISPLAY_LABEL_OVERRIDES[param_key]
+    info = PARAM_INFO.get(param_key, {})
+    return info.get("name", param_key)
+
 # Group parameters by category for guided flow
 PARAM_CATEGORIES = {
     "Slab Size": ["a", "b", "t"],
@@ -403,7 +423,7 @@ def display_current_status(params: Dict[str, Any], stage: str = "collecting"):
                     info = PARAM_INFO[key]
                     with cols[idx % 4]:
                         st.metric(
-                            label=f"{info['icon']} {info['name']}", 
+                            label=f"{info['icon']} {get_param_display_name(key)}",
                             value=format_value_with_unit(value, key)
                         )
     
@@ -411,7 +431,7 @@ def display_current_status(params: Dict[str, Any], stage: str = "collecting"):
     missing = [k for k in PARAM_ORDER if k not in params]
     if missing:
         st.markdown("#### ⏳ Still Needed:")
-        missing_text = ", ".join([f"{PARAM_INFO[k]['icon']} {PARAM_INFO[k]['name']}" for k in missing[:5]])
+        missing_text = ", ".join([f"{PARAM_INFO[k]['icon']} {get_param_display_name(k)}" for k in missing[:5]])
         if len(missing) > 5:
             missing_text += f" (+{len(missing) - 5} more)"
         st.markdown(missing_text)
@@ -422,8 +442,9 @@ def display_current_status(params: Dict[str, Any], stage: str = "collecting"):
 def get_friendly_param_question(key: str, params: Dict[str, Any]) -> str:
     """Generate a friendly question for a specific parameter."""
     info = PARAM_INFO[key]
+    display_name = get_param_display_name(key)
     
-    question = f"{info['icon']} **{info['name']}** ({info['technical_name']})\n\n"
+    question = f"{info['icon']} **{display_name}** ({info['technical_name']})\n\n"
     question += f"📝 *What this means:* {info['simple_explanation']}\n\n"
     question += f"📏 *Typical range:* {info['typical_range']}\n\n"
     question += f"💡 *Example:* {info['example']}\n\n"
@@ -632,6 +653,18 @@ We're going to configure a few settings for your concrete slab (the road surface
 - For each question, I'll explain what it means in plain English
 - You can give me a value, or just say **"default"** to use the suggested value
 - If you know multiple values already, feel free to tell me all at once!
+
+### 📏 Base Units:
+Please enter values in these units.
+- **Elastic Modulus (E):** MPa
+- **Poisson's Ratio (ν):** dimensionless (no unit)
+- **Slab Length (a):** mm
+- **Slab Width (b):** mm
+- **Slab Thickness (t):** mm
+- **Soil Stiffness (Kx, Ky, Kz):** no unit (stiffness factor)
+- **Load coordinates (x1, x2, y1, y2):** mm
+- **Tire pressure (q):** MPa
+- **Node coordinates (x, y):** mm
 
 ---
 

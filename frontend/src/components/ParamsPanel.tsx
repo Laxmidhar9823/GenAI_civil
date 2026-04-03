@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import { getParamDisplayLabel } from '../lib/displayLabels'
 
 const HIDDEN_COLLECTED_KEYS = new Set(['mesh_type', 'load_location'])
 
@@ -83,7 +84,7 @@ export default function ParamsPanel(props: {
     const allKeys = Object.keys(collected).sort((a, b) => a.localeCompare(b))
     return allKeys.map((k) => {
       const meta = paramInfo?.[k]
-      const mainLabel = meta?.name || meta?.technical_name || k
+      const mainLabel = getParamDisplayLabel(k, meta)
       return { key: k, mainLabel, value: collected[k] }
     })
   }, [collected, paramInfo])
@@ -142,8 +143,7 @@ export default function ParamsPanel(props: {
     const source = collected || {}
     return keys.map((k) => {
       const meta = paramInfo?.[k]
-      // Preferred display name: "name" (Friendly) > "technical_name" > key
-      const mainLabel = meta?.name || meta?.technical_name || k
+      const mainLabel = getParamDisplayLabel(k, meta)
 
       return {
         key: k,

@@ -1,6 +1,7 @@
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { ChatMessage as ChatMessageT } from '../lib/types'
+import { transformAssistantDisplayText } from '../lib/displayLabels'
 
 const UserIcon = () => (
   <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -21,6 +22,7 @@ const BotIcon = () => (
 
 export default function ChatMessage({ msg }: { msg: ChatMessageT }) {
   const isUser = msg.role === 'user'
+  const displayContent = isUser ? msg.content : transformAssistantDisplayText(msg.content)
 
   return (
     <article className={`message ${isUser ? 'user' : 'ai'}`}>
@@ -33,7 +35,7 @@ export default function ChatMessage({ msg }: { msg: ChatMessageT }) {
           <div className="user-content">{msg.content}</div>
         ) : (
           <div className="markdown-content">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>{displayContent}</ReactMarkdown>
           </div>
         )}
       </div>

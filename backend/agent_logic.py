@@ -2204,6 +2204,18 @@ We're going to configure a few settings for your concrete slab (the road surface
 - You can give me a value, or just say **\"default\"** to use the suggested value
 - If you know multiple values already, feel free to tell me all at once!
 
+### 📏 Base Units:
+Please enter values in these units.
+- **Elastic Modulus (E):** MPa
+- **Poisson's Ratio (ν):** dimensionless (no unit)
+- **Slab Length (a):** mm
+- **Slab Width (b):** mm
+- **Slab Thickness (t):** mm
+- **Soil Stiffness (Kx, Ky, Kz):** no unit (stiffness factor)
+- **Load coordinates (x1, x2, y1, y2):** mm
+- **Tire pressure (q):** MPa
+- **Node coordinates (x, y):** mm
+
 ---
 
 **Ready to start?** Just tell me about your pavement, or type **\"let's begin\"** and I'll guide you step by step! 

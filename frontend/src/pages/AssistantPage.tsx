@@ -10,6 +10,49 @@ function newId() {
   return `${Date.now()}_${Math.random().toString(16).slice(2)}`
 }
 
+function normalizeMeshType(v: string): 'coarse' | 'medium' | 'fine' {
+  const lowered = (v || '').trim().toLowerCase()
+  if (lowered === 'coarse' || lowered === 'medium' || lowered === 'fine') return lowered
+  return 'coarse'
+}
+
+function linspaceNodes(spanMm: number, elements: number): number[] {
+  const span = Number(spanMm)
+  const elems = Math.max(0, Math.floor(Number(elements)))
+  if (!Number.isFinite(span) || span < 0) return []
+  if (elems <= 0) return [0, span]
+
+  const values: number[] = []
+  for (let i = 0; i <= elems; i++) {
+    const raw = (span * i) / elems
+    values.push(Math.round(raw * 1000) / 1000)
+  }
+  values[0] = 0
+  values[values.length - 1] = span
+  return values
+}
+
+function inferNodesFromMesh(meshType: string, a: number, b: number) {
+  const level = normalizeMeshType(meshType)
+  const elementsByLevel: Record<'coarse' | 'medium' | 'fine', number> = {
+    coarse: 10,
+    medium: 15,
+    fine: 30,
+  }
+  const elements = elementsByLevel[level]
+  return {
+    x: linspaceNodes(a, elements),
+    y: linspaceNodes(b, elements),
+  }
+}
+
+function inferSpanFromNodes(v: unknown): number | null {
+  if (!Array.isArray(v) || v.length < 2) return null
+  const last = v[v.length - 1]
+  const n = typeof last === 'number' ? last : Number(last)
+  return Number.isFinite(n) && n >= 0 ? n : null
+}
+
 export default function AssistantPage() {
   const [error, setError] = useState<string | null>(null)
   const [schema, setSchema] = useState<SchemaResponse | null>(null)
@@ -215,6 +258,88 @@ export default function AssistantPage() {
     }
   }
 
+  const applyParamEdit = useCallback(
+    (key: string, rawValue: string) => {
+      const k = key.trim()
+      if (!k) return
+
+      // Never allow manual editing of derived node arrays.
+      if (k === 'x' || k === 'y') return
+
+      // Any edit invalidates prior confirmation.
+      setFinalConfirmed(false)
+
+      // Build a consistent snapshot of params: (current state.params + this edit).
+      const baseParams = (state?.params ?? {}) as Record<string, unknown>
+      const nextParams = { ...baseParams } as Record<string, unknown>
+
+      if (k === 'mesh_type' || k === 'load_location') {
+        nextParams[k] = rawValue.trim().toLowerCase()
+      } else {
+        const n = Number(rawValue)
+        if (!Number.isFinite(n)) return
+        nextParams[k] = n
+      }
+
+      // Mesh dependency: x/y are derived from (a,b,mesh_type).
+      let derivedNodes: { x: number[]; y: number[] } | null = null
+      if (k === 'mesh_type' || k === 'a' || k === 'b') {
+        const aRaw = Number(nextParams['a'])
+        const bRaw = Number(nextParams['b'])
+        const a = Number.isFinite(aRaw) && aRaw >= 0 ? aRaw : inferSpanFromNodes(nextParams['x'])
+        const b = Number.isFinite(bRaw) && bRaw >= 0 ? bRaw : inferSpanFromNodes(nextParams['y'])
+        const meshType = String(nextParams['mesh_type'] ?? '')
+        if (a !== null && b !== null) {
+          derivedNodes = inferNodesFromMesh(meshType, a, b)
+          if (derivedNodes.x.length && derivedNodes.y.length) {
+            nextParams['x'] = derivedNodes.x
+            nextParams['y'] = derivedNodes.y
+          }
+        }
+      }
+
+      setState((prev) => {
+        const base: ConversationState =
+          prev ??
+          ({
+            messages: [],
+            params: {},
+            user_provided_keys: [],
+            current_asking: null,
+            mode: 'welcome',
+            welcomed: false,
+          } as ConversationState)
+
+        const nextUserKeys = Array.isArray(base.user_provided_keys)
+          ? Array.from(new Set([...base.user_provided_keys, k]))
+          : [k]
+
+        return {
+          ...base,
+          params: nextParams,
+          user_provided_keys: nextUserKeys,
+        }
+      })
+
+      // If export-ready final_params exists, patch its nodes too.
+      if (derivedNodes) {
+        setFinalParamsFromResponse((prevFinal) => {
+          if (!prevFinal || typeof prevFinal !== 'object') return prevFinal
+          const next = { ...prevFinal } as Record<string, unknown>
+          const nodesObj =
+            next.nodes && typeof next.nodes === 'object' && !Array.isArray(next.nodes)
+              ? ({ ...(next.nodes as Record<string, unknown>) } as Record<string, unknown>)
+              : ({} as Record<string, unknown>)
+          nodesObj.x = derivedNodes.x
+          nodesObj.y = derivedNodes.y
+          next.nodes = nodesObj
+          return next
+        })
+      }
+    },
+    [state],
+  )
+
   return (
     <div className="chat-layout">
        {/* Left Sidebar: Settings */}
@@ -253,10 +378,8 @@ export default function AssistantPage() {
           busy={busy}
           finalConfirmed={finalConfirmed}
           onConfirmFinal={() => setFinalConfirmed(true)}
-          onEditParam={async (key, value) => {
-            // Route edits through the existing /chat logic (LLM extraction + validation)
-            // so we don't duplicate rules in the frontend.
-            await handleSend(`Update ${key} to ${value}`)
+          onEditParam={(key, value) => {
+            applyParamEdit(key, value)
           }}
        />
     </div>

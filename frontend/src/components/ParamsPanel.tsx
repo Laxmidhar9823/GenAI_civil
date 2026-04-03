@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react'
 import { getParamDisplayLabel } from '../lib/displayLabels'
+import { validateInlineEngineeringEdit } from '../lib/engineeringValidation'
 
 const HIDDEN_COLLECTED_KEYS = new Set<string>([])
 
@@ -73,7 +74,9 @@ export default function ParamsPanel(props: {
   const [rowEditingKey, setRowEditingKey] = useState<string | null>(null)
   const [rowDraftValue, setRowDraftValue] = useState('')
   const [rowEditError, setRowEditError] = useState<string | null>(null)
+  const [rowEditWarning, setRowEditWarning] = useState<string | null>(null)
   const [rowSaving, setRowSaving] = useState(false)
+  const [rowNotice, setRowNotice] = useState<{ key: string; message: string } | null>(null)
 
   const keys = useMemo(() => {
     if (paramInfo) {
@@ -84,12 +87,6 @@ export default function ParamsPanel(props: {
     }
     return []
   }, [paramInfo, collected])
-
-  function isNumericKey(key: string): boolean {
-    if (key === 'mesh_type' || key === 'load_location') return false
-    if (key === 'x' || key === 'y') return false
-    return true
-  }
 
   function renderValueForEdit(v: unknown): string {
     if (v === undefined || v === null) return ''
@@ -123,38 +120,23 @@ export default function ParamsPanel(props: {
     return { preview, full }
   }
 
-  function validateEditInput(key: string, raw: string): string | null {
+  function validateRowEdit(key: string, raw: string): { error: string | null; warning: string | null; normalizedValue: string } {
     const trimmedKey = key.trim()
-    const trimmedValue = raw.trim()
-    if (!trimmedKey) return 'Choose a field to edit.'
-    if (!trimmedValue) return 'Enter a value.'
-
-    if (trimmedKey === 'x' || trimmedKey === 'y') {
-      return 'Node coordinates are calculated and cannot be edited.'
-    }
-
     if (!canEditKey(trimmedKey)) {
-      return 'This parameter cannot be edited.'
+      return { error: 'This parameter cannot be edited.', warning: null, normalizedValue: raw.trim() }
     }
 
-    if (trimmedKey === 'mesh_type') {
-      const v = trimmedValue.toLowerCase()
-      if (!['coarse', 'medium', 'fine'].includes(v)) return "Mesh type must be: coarse, medium, or fine."
-      return null
+    const res = validateInlineEngineeringEdit({
+      key: trimmedKey,
+      rawValue: raw,
+      currentParams: collected ?? {},
+    })
+
+    if (!res.ok) {
+      return { error: res.error, warning: null, normalizedValue: res.normalizedValue }
     }
 
-    if (trimmedKey === 'load_location') {
-      const v = trimmedValue.toLowerCase()
-      if (!['corner', 'edge', 'interior'].includes(v)) return "Load location must be: corner, edge, or interior."
-      return null
-    }
-
-    if (isNumericKey(trimmedKey)) {
-      const n = Number(trimmedValue)
-      if (!Number.isFinite(n)) return 'Enter a numeric value.'
-    }
-
-    return null
+    return { error: null, warning: res.warning ?? null, normalizedValue: res.normalizedValue }
   }
 
   const rows = useMemo(() => {
@@ -231,6 +213,7 @@ export default function ParamsPanel(props: {
                                 })()}
                                 onChange={(e) => {
                                   setRowEditError(null)
+                                  setRowEditWarning(null)
                                   setRowDraftValue(e.target.value)
                                 }}
                                 disabled={busy || rowSaving}
@@ -248,6 +231,7 @@ export default function ParamsPanel(props: {
                                 })()}
                                 onChange={(e) => {
                                   setRowEditError(null)
+                                  setRowEditWarning(null)
                                   setRowDraftValue(e.target.value)
                                 }}
                                 disabled={busy || rowSaving}
@@ -265,12 +249,19 @@ export default function ParamsPanel(props: {
                                 value={rowDraftValue}
                                 onChange={(e) => {
                                   setRowEditError(null)
+                                  setRowEditWarning(null)
                                   setRowDraftValue(e.target.value)
                                 }}
                                 placeholder="Enter value"
                                 disabled={busy || rowSaving}
                                 autoComplete="off"
                               />
+                            )}
+
+                            {rowEditWarning && (
+                              <div className="sub" style={{ marginTop: '6px', color: 'var(--warning)' }}>
+                                {rowEditWarning}
+                              </div>
                             )}
                           </>
                         ) : (
@@ -293,6 +284,12 @@ export default function ParamsPanel(props: {
                             ) : (
                               <span className="param-value-display">{typeof r.value === 'object' ? JSON.stringify(r.value) : String(r.value)}</span>
                             )}
+
+                            {rowNotice?.key === r.key && (
+                              <div className="sub" style={{ marginTop: '6px', color: 'var(--warning)' }}>
+                                {rowNotice.message}
+                              </div>
+                            )}
                           </>
                         )}
 
@@ -314,6 +311,7 @@ export default function ParamsPanel(props: {
                               disabled={busy || rowSaving}
                               onClick={() => {
                                 setRowEditError(null)
+                                setRowEditWarning(null)
                                 setRowEditingKey(null)
                                 setRowDraftValue('')
                               }}
@@ -328,22 +326,31 @@ export default function ParamsPanel(props: {
                               aria-label="Save"
                               disabled={busy || rowSaving}
                               onClick={async () => {
-                                const err = validateEditInput(r.key, rowDraftValue)
-                                if (err) {
-                                  setRowEditError(err)
+                                const { error, warning, normalizedValue } = validateRowEdit(r.key, rowDraftValue)
+                                if (error) {
+                                  setRowEditError(error)
                                   return
                                 }
 
                                 setRowSaving(true)
                                 setRowEditError(null)
+                                setRowEditWarning(warning)
                                 try {
-                                  const outgoing =
-                                    r.key === 'mesh_type' || r.key === 'load_location'
-                                      ? rowDraftValue.trim().toLowerCase()
-                                      : rowDraftValue.trim()
+                                  const outgoing = normalizedValue
                                   await Promise.resolve(onEditParam(r.key, outgoing))
+
+                                  if (warning) {
+                                    setRowNotice({ key: r.key, message: warning })
+                                    window.setTimeout(() => {
+                                      setRowNotice((prev) => (prev?.key === r.key ? null : prev))
+                                    }, 8000)
+                                  } else {
+                                    setRowNotice((prev) => (prev?.key === r.key ? null : prev))
+                                  }
+
                                   setRowEditingKey(null)
                                   setRowDraftValue('')
+                                  setRowEditWarning(null)
                                 } catch (e) {
                                   setRowEditError((e as Error).message)
                                 } finally {
@@ -364,6 +371,8 @@ export default function ParamsPanel(props: {
                               disabled={busy || rowSaving}
                               onClick={() => {
                                 setRowEditError(null)
+                                setRowEditWarning(null)
+                                setRowNotice((prev) => (prev?.key === r.key ? null : prev))
                                 setRowEditingKey(r.key)
                                 const start = renderValueForEdit(r.value)
                                 setRowDraftValue(start)

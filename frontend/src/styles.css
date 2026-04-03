@@ -368,7 +368,7 @@ h3 {
 /* Chat/App Interface */
 .chat-layout {
   display: grid;
-  grid-template-columns: 320px 1fr 320px;
+  grid-template-columns: 320px 1fr minmax(360px, 400px);
   height: calc(100vh - 52px); /* Minus header height */
   overflow: hidden;
   background-color: var(--bg-app);
@@ -638,6 +638,7 @@ h3 {
   border-left: 1px solid var(--border-subtle);
   padding: var(--space-4);
   overflow-y: auto;
+  overflow-x: hidden;
   min-height: 0; /* Important for grid/flex nested scrolling */
 }
 
@@ -744,6 +745,52 @@ h3 {
   border-radius: var(--radius-md);
 }
 
+/* ParamsPanel: stable 3-column layout, no horizontal scroll, wrap long text */
+.params-panel .table-wrap {
+  overflow-x: hidden;
+}
+
+.params-panel .table {
+  table-layout: fixed;
+}
+
+.params-panel .table th {
+  white-space: normal;
+}
+
+.params-panel .table td {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  vertical-align: top;
+}
+
+.param-value-cell {
+  min-width: 0;
+}
+
+.param-actions-cell {
+  width: 72px;
+}
+
+.param-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.param-value-display {
+  display: block;
+  font-weight: 500;
+}
+
+.param-array-preview {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 500;
+}
+
 .table {
   width: 100%;
   border-collapse: collapse;
@@ -772,8 +819,9 @@ h3 {
 
 .param-label-wrap {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
+  flex-wrap: wrap;
 }
 
 .param-symbol {
@@ -797,6 +845,57 @@ h3 {
   font-weight: 500;
   font-size: 13px;
   color: var(--text-primary);
+  min-width: 0;
+}
+
+.param-edit-cell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.param-edit-input {
+  flex: 1;
+  min-width: 0;
+  width: 100%;
+  padding: 6px 10px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-light);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  background: white;
+  color: var(--text-primary);
+}
+
+.param-edit-input:focus {
+  outline: none;
+  border-color: var(--border-focus);
+  box-shadow: 0 0 0 3px rgba(0, 113, 227, 0.15);
+}
+
+.param-edit-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-light);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.param-edit-btn:hover {
+  background: var(--bg-subtle);
+  color: var(--text-primary);
+}
+
+.param-edit-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 /* Component: Status/Pill */

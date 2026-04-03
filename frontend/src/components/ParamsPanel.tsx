@@ -1,7 +1,25 @@
 import { useMemo, useState } from 'react'
 import { getParamDisplayLabel } from '../lib/displayLabels'
 
-const HIDDEN_COLLECTED_KEYS = new Set(['mesh_type', 'load_location'])
+const HIDDEN_COLLECTED_KEYS = new Set<string>([])
+
+const EDITABLE_KEYS = new Set([
+  'Emod',
+  'nu',
+  'a',
+  'b',
+  't',
+  'Kx',
+  'Ky',
+  'Kz',
+  'x1',
+  'x2',
+  'y1',
+  'y2',
+  'q',
+  'mesh_type',
+  'load_location',
+])
 
 function downloadBlob(filename: string, blob: Blob) {
   const url = URL.createObjectURL(blob)
@@ -46,17 +64,16 @@ export default function ParamsPanel(props: {
   // When true, export buttons are enabled.
   finalConfirmed: boolean
   onConfirmFinal: () => void
-  // Edits are applied by the parent using the existing /chat endpoint.
+  // Edits are applied by the parent (e.g., via backend chat/state update).
   onEditParam: (key: string, value: string) => Promise<void> | void
 }) {
   const { progress, paramInfo, collected, finalParams, busy, finalConfirmed, onConfirmFinal, onEditParam } = props
 
-  // Local UI state for single-field edit workflow.
-  const [editOpen, setEditOpen] = useState(false)
-  const [editKey, setEditKey] = useState('')
-  const [editValue, setEditValue] = useState('')
-  const [editError, setEditError] = useState<string | null>(null)
-  const [saving, setSaving] = useState(false)
+  // Inline edit state (Collected Parameters panel).
+  const [rowEditingKey, setRowEditingKey] = useState<string | null>(null)
+  const [rowDraftValue, setRowDraftValue] = useState('')
+  const [rowEditError, setRowEditError] = useState<string | null>(null)
+  const [rowSaving, setRowSaving] = useState(false)
 
   const keys = useMemo(() => {
     if (paramInfo) {
@@ -68,31 +85,42 @@ export default function ParamsPanel(props: {
     return []
   }, [paramInfo, collected])
 
-  const editKeys = useMemo(() => {
-    const s = new Set<string>()
-    if (collected) {
-      for (const k of Object.keys(collected)) s.add(k)
-    }
-    if (paramInfo) {
-      for (const k of Object.keys(paramInfo)) s.add(k)
-    }
-    return [...s].sort((a, b) => a.localeCompare(b))
-  }, [collected, paramInfo])
-
-  const reviewRows = useMemo(() => {
-    if (!collected) return []
-    const allKeys = Object.keys(collected).sort((a, b) => a.localeCompare(b))
-    return allKeys.map((k) => {
-      const meta = paramInfo?.[k]
-      const mainLabel = getParamDisplayLabel(k, meta)
-      return { key: k, mainLabel, value: collected[k] }
-    })
-  }, [collected, paramInfo])
-
   function isNumericKey(key: string): boolean {
     if (key === 'mesh_type' || key === 'load_location') return false
     if (key === 'x' || key === 'y') return false
     return true
+  }
+
+  function renderValueForEdit(v: unknown): string {
+    if (v === undefined || v === null) return ''
+    if (typeof v === 'string') return v
+    if (typeof v === 'number') return String(v)
+    try {
+      return JSON.stringify(v)
+    } catch {
+      return String(v)
+    }
+  }
+
+  function canEditKey(key: string): boolean {
+    if (key === 'x' || key === 'y') return false
+    return EDITABLE_KEYS.has(key)
+  }
+
+  function asNumberArray(v: unknown): number[] | null {
+    if (!Array.isArray(v)) return null
+    const nums = v.map((n) => (typeof n === 'number' ? n : Number(n)))
+    if (nums.some((n) => !Number.isFinite(n))) return null
+    return nums
+  }
+
+  function formatNodeArrayPreview(arr: number[], maxItems = 4) {
+    const full = `[${arr.join(',')}]`
+    const preview =
+      arr.length > maxItems
+        ? `[${arr.slice(0, maxItems).join(',')},...]`
+        : `[${arr.join(',')}]`
+    return { preview, full }
   }
 
   function validateEditInput(key: string, raw: string): string | null {
@@ -100,6 +128,14 @@ export default function ParamsPanel(props: {
     const trimmedValue = raw.trim()
     if (!trimmedKey) return 'Choose a field to edit.'
     if (!trimmedValue) return 'Enter a value.'
+
+    if (trimmedKey === 'x' || trimmedKey === 'y') {
+      return 'Node coordinates are calculated and cannot be edited.'
+    }
+
+    if (!canEditKey(trimmedKey)) {
+      return 'This parameter cannot be edited.'
+    }
 
     if (trimmedKey === 'mesh_type') {
       const v = trimmedValue.toLowerCase()
@@ -111,23 +147,6 @@ export default function ParamsPanel(props: {
       const v = trimmedValue.toLowerCase()
       if (!['corner', 'edge', 'interior'].includes(v)) return "Load location must be: corner, edge, or interior."
       return null
-    }
-
-    if (trimmedKey === 'x' || trimmedKey === 'y') {
-      // Expect a JSON array of numbers, e.g. [0, 350, 700, 3500]
-      try {
-        const parsed = JSON.parse(trimmedValue)
-        if (!Array.isArray(parsed) || parsed.length < 2) return 'Enter at least two numeric coordinates.'
-        const nums = parsed.map((n) => (typeof n === 'number' ? n : Number(n)))
-        if (nums.some((n) => !Number.isFinite(n))) return 'All coordinates must be numeric.'
-        if (nums.some((n) => n < 0)) return 'Coordinates cannot be negative.'
-        for (let i = 1; i < nums.length; i++) {
-          if (nums[i] <= nums[i - 1]) return 'Coordinates must be in strictly increasing order.'
-        }
-        return null
-      } catch {
-        return 'Enter coordinates as a JSON array, e.g. [0, 350, 700, 3500].'
-      }
     }
 
     if (isNumericKey(trimmedKey)) {
@@ -178,11 +197,17 @@ export default function ParamsPanel(props: {
         <div className="card-body" style={{ padding: 0 }}>
           {rows.length ? (
             <div className="table-wrap" style={{ border: 'none', borderRadius: 0 }}>
-              <table className="table">
+              <table className="table params-collected-table">
+                <colgroup>
+                  <col style={{ width: '40%' }} />
+                  <col style={{ width: '60%' }} />
+                  <col style={{ width: '72px' }} />
+                </colgroup>
                 <thead>
                   <tr>
-                    <th style={{ width: '50%' }}>Parameter</th>
+                    <th>Parameter</th>
                     <th>Value</th>
+                    <th aria-label="Edit" />
                   </tr>
                 </thead>
                 <tbody>
@@ -194,11 +219,160 @@ export default function ParamsPanel(props: {
                           <span className="param-main-label">{r.mainLabel}</span>
                         </div>
                       </td>
-                      <td>
-                        {r.value === undefined || r.value === null || String(r.value) === '' ? 
-                          <span className="sub" style={{ opacity: 0.5 }}>—</span> : 
-                          <span style={{ fontWeight: 500 }}>{String(r.value)}</span>
-                        }
+                      <td className="param-value-cell">
+                        {rowEditingKey === r.key ? (
+                          <>
+                            {r.key === 'mesh_type' ? (
+                              <select
+                                className="param-edit-input"
+                                value={(() => {
+                                  const v = rowDraftValue.trim().toLowerCase()
+                                  return ['coarse', 'medium', 'fine'].includes(v) ? v : 'medium'
+                                })()}
+                                onChange={(e) => {
+                                  setRowEditError(null)
+                                  setRowDraftValue(e.target.value)
+                                }}
+                                disabled={busy || rowSaving}
+                              >
+                                <option value="coarse">coarse</option>
+                                <option value="medium">medium</option>
+                                <option value="fine">fine</option>
+                              </select>
+                            ) : r.key === 'load_location' ? (
+                              <select
+                                className="param-edit-input"
+                                value={(() => {
+                                  const v = rowDraftValue.trim().toLowerCase()
+                                  return ['corner', 'edge', 'interior'].includes(v) ? v : 'interior'
+                                })()}
+                                onChange={(e) => {
+                                  setRowEditError(null)
+                                  setRowDraftValue(e.target.value)
+                                }}
+                                disabled={busy || rowSaving}
+                              >
+                                <option value="corner">corner</option>
+                                <option value="edge">edge</option>
+                                <option value="interior">interior</option>
+                              </select>
+                            ) : (
+                              <input
+                                className="param-edit-input"
+                                type="number"
+                                inputMode="decimal"
+                                step="any"
+                                value={rowDraftValue}
+                                onChange={(e) => {
+                                  setRowEditError(null)
+                                  setRowDraftValue(e.target.value)
+                                }}
+                                placeholder="Enter value"
+                                disabled={busy || rowSaving}
+                                autoComplete="off"
+                              />
+                            )}
+                          </>
+                        ) : (
+                          <>
+                            {r.value === undefined || r.value === null || String(r.value) === '' ? (
+                              <span className="sub" style={{ opacity: 0.5 }}>—</span>
+                            ) : r.key === 'x' || r.key === 'y' ? (
+                              (() => {
+                                const nums = asNumberArray(r.value)
+                                if (!nums) {
+                                  return <span className="param-value-display">{typeof r.value === 'object' ? JSON.stringify(r.value) : String(r.value)}</span>
+                                }
+                                const { preview, full } = formatNodeArrayPreview(nums)
+                                return (
+                                  <span className="param-array-preview" title={full} aria-label={full}>
+                                    {preview}
+                                  </span>
+                                )
+                              })()
+                            ) : (
+                              <span className="param-value-display">{typeof r.value === 'object' ? JSON.stringify(r.value) : String(r.value)}</span>
+                            )}
+                          </>
+                        )}
+
+                        {rowEditingKey === r.key && rowEditError && (
+                          <div className="sub" style={{ marginTop: '6px', color: 'var(--danger)' }}>
+                            {rowEditError}
+                          </div>
+                        )}
+                      </td>
+
+                      <td className="param-actions-cell">
+                        {rowEditingKey === r.key ? (
+                          <div className="param-actions">
+                            <button
+                              type="button"
+                              className="param-edit-btn"
+                              title="Cancel"
+                              aria-label="Cancel"
+                              disabled={busy || rowSaving}
+                              onClick={() => {
+                                setRowEditError(null)
+                                setRowEditingKey(null)
+                                setRowDraftValue('')
+                              }}
+                            >
+                              ✕
+                            </button>
+
+                            <button
+                              type="button"
+                              className="param-edit-btn"
+                              title="Save"
+                              aria-label="Save"
+                              disabled={busy || rowSaving}
+                              onClick={async () => {
+                                const err = validateEditInput(r.key, rowDraftValue)
+                                if (err) {
+                                  setRowEditError(err)
+                                  return
+                                }
+
+                                setRowSaving(true)
+                                setRowEditError(null)
+                                try {
+                                  const outgoing =
+                                    r.key === 'mesh_type' || r.key === 'load_location'
+                                      ? rowDraftValue.trim().toLowerCase()
+                                      : rowDraftValue.trim()
+                                  await Promise.resolve(onEditParam(r.key, outgoing))
+                                  setRowEditingKey(null)
+                                  setRowDraftValue('')
+                                } catch (e) {
+                                  setRowEditError((e as Error).message)
+                                } finally {
+                                  setRowSaving(false)
+                                }
+                              }}
+                            >
+                              ✓
+                            </button>
+                          </div>
+                        ) : canEditKey(r.key) ? (
+                          <div className="param-actions">
+                            <button
+                              type="button"
+                              className="param-edit-btn"
+                              title={`Edit ${r.key}`}
+                              aria-label={`Edit ${r.key}`}
+                              disabled={busy || rowSaving}
+                              onClick={() => {
+                                setRowEditError(null)
+                                setRowEditingKey(r.key)
+                                const start = renderValueForEdit(r.value)
+                                setRowDraftValue(start)
+                              }}
+                            >
+                              ✎
+                            </button>
+                          </div>
+                        ) : null}
                       </td>
                     </tr>
                   ))}
@@ -213,212 +387,57 @@ export default function ParamsPanel(props: {
         </div>
       </div>
 
-      {/*
-        Review + edit step:
-        - Shows a full summary of collected values (including normally hidden keys)
-        - Allows editing a single field and re-validates via existing backend chat logic
-        - Requires confirmation before enabling export (prevents exporting without review)
-      */}
       {finalParams && (
         <div style={{ marginTop: '24px' }}>
           <div className="card">
             <div className="card-header">
-              <h3>Review Before Export</h3>
+              <h3>Export</h3>
             </div>
             <div className="card-body">
-              <div className="sub" style={{ marginBottom: '12px' }}>
-                Review the values below. Choose “Edit values” to correct one field, or “Continue with current values” to enable export.
-              </div>
-
-              {reviewRows.length ? (
-                <div className="table-wrap" style={{ marginBottom: '12px' }}>
-                  <table className="table">
-                    <thead>
-                      <tr>
-                        <th style={{ width: '50%' }}>Parameter</th>
-                        <th>Value</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {reviewRows.map((r) => (
-                        <tr key={r.key}>
-                          <td>
-                            <div className="param-label-wrap">
-                              <span className="param-symbol" title={`Symbol: ${r.key}`}>{r.key}</span>
-                              <span className="param-main-label">{r.mainLabel}</span>
-                            </div>
-                          </td>
-                          <td>
-                            {r.value === undefined || r.value === null || String(r.value) === '' ? (
-                              <span className="sub" style={{ opacity: 0.5 }}>—</span>
-                            ) : (
-                              <span style={{ fontWeight: 500 }}>
-                                {typeof r.value === 'object' && r.value !== null ? JSON.stringify(r.value) : String(r.value)}
-                              </span>
-                            )}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+              {!finalConfirmed ? (
+                <>
+                  <div className="sub" style={{ marginBottom: '12px' }}>
+                    Export is disabled until you confirm.
+                  </div>
+                  <button
+                    className="btn primary"
+                    style={{ width: '100%' }}
+                    disabled={busy}
+                    onClick={onConfirmFinal}
+                  >
+                    Enable export
+                  </button>
+                </>
               ) : (
-                <div className="sub" style={{ marginBottom: '12px' }}>No collected parameters found.</div>
-              )}
+                <>
+                  <button
+                    className="btn primary"
+                    style={{ width: '100%' }}
+                    onClick={() => {
+                      const sanitized = sanitizeExportPayload(finalParams)
+                      const prettyJson = JSON.stringify(sanitized, null, 2)
+                      const blob = new Blob([prettyJson], { type: 'application/json' })
+                      downloadBlob('pavement-config.json', blob)
+                    }}
+                  >
+                    Export Final JSON
+                  </button>
 
-              <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
-                <button
-                  className="btn"
-                  onClick={() => {
-                    setEditError(null)
-                    setEditOpen((v) => !v)
-                    if (!editKey && editKeys.length) {
-                      setEditKey(editKeys[0])
-                    }
-                  }}
-                  disabled={busy}
-                >
-                  {editOpen ? 'Close edit' : 'Edit values'}
-                </button>
-
-                <button
-                  className="btn primary"
-                  onClick={() => {
-                    setEditError(null)
-                    setEditOpen(false)
-                    onConfirmFinal()
-                  }}
-                  disabled={busy}
-                >
-                  Continue with current values
-                </button>
-              </div>
-
-              {!finalConfirmed && (
-                <div className="status-detail warning" style={{ marginTop: '12px' }}>
-                  Export is disabled until you confirm.
-                </div>
-              )}
-
-              {editOpen && (
-                <div style={{ marginTop: '14px' }}>
-                  <div className="sub" style={{ marginBottom: '10px' }}>
-                    Edit one field (only that value will be requested again).
-                  </div>
-
-                  <div className="input-group" style={{ display: 'grid', gridTemplateColumns: '1fr', gap: '10px' }}>
-                    <div>
-                      <label className="sub" style={{ display: 'block', marginBottom: '6px' }}>Field</label>
-                      <select
-                        className="chat-input"
-                        value={editKey}
-                        onChange={(e) => {
-                          setEditError(null)
-                          setEditKey(e.target.value)
-                        }}
-                        disabled={busy || saving}
-                      >
-                        {editKeys.map((k) => (
-                          <option key={k} value={k}>{k}</option>
-                        ))}
-                      </select>
-                    </div>
-
-                    <div>
-                      <label className="sub" style={{ display: 'block', marginBottom: '6px' }}>New value</label>
-                      <input
-                        className="chat-input"
-                        value={editValue}
-                        onChange={(e) => {
-                          setEditError(null)
-                          setEditValue(e.target.value)
-                        }}
-                        placeholder={editKey === 'x' || editKey === 'y' ? '[0, 350, 700, 3500]' : 'Enter value'}
-                        disabled={busy || saving}
-                        autoComplete="off"
-                      />
-                    </div>
-                  </div>
-
-                  {editError && (
-                    <div className="status-detail warning" style={{ marginTop: '10px' }}>
-                      {editError}
-                    </div>
-                  )}
-
-                  <div style={{ display: 'flex', gap: '10px', marginTop: '12px' }}>
-                    <button
-                      className="btn"
-                      disabled={busy || saving}
-                      onClick={() => {
-                        setEditError(null)
-                        setEditOpen(false)
-                        setEditValue('')
-                      }}
-                    >
-                      Cancel
-                    </button>
-
-                    <button
-                      className="btn primary"
-                      disabled={busy || saving}
-                      onClick={async () => {
-                        const err = validateEditInput(editKey, editValue)
-                        if (err) {
-                          setEditError(err)
-                          return
-                        }
-
-                        setSaving(true)
-                        setEditError(null)
-                        try {
-                          // Apply update through parent callback (chat endpoint); backend will do full validation.
-                          await Promise.resolve(onEditParam(editKey.trim(), editValue.trim()))
-                          setEditOpen(false)
-                          setEditValue('')
-                        } catch (e) {
-                          setEditError((e as Error).message)
-                        } finally {
-                          setSaving(false)
-                        }
-                      }}
-                    >
-                      Save update
-                    </button>
-                  </div>
-                </div>
+                  <button
+                    className="btn"
+                    style={{ width: '100%', marginTop: '10px' }}
+                    onClick={() => {
+                      const txt = toTxtReport(sanitizeExportPayload(finalParams))
+                      const blob = new Blob([txt], { type: 'text/plain' })
+                      downloadBlob('pavement-config.txt', blob)
+                    }}
+                  >
+                    Export Text Report
+                  </button>
+                </>
               )}
             </div>
           </div>
-        </div>
-      )}
-
-      {finalParams && finalConfirmed && (
-        <div style={{ marginTop: '24px' }}>
-             <button 
-                className="btn primary" 
-                style={{ width: '100%' }}
-                onClick={() => {
-                const sanitized = sanitizeExportPayload(finalParams)
-                const prettyJson = JSON.stringify(sanitized, null, 2)
-                 const blob = new Blob([prettyJson], { type: 'application/json' })
-                 downloadBlob('pavement-config.json', blob)
-                }}
-             >
-               Export Final JSON
-             </button>
-
-             <button
-               className="btn"
-               style={{ width: '100%', marginTop: '10px' }}
-               onClick={() => {
-                 const txt = toTxtReport(sanitizeExportPayload(finalParams))
-                 const blob = new Blob([txt], { type: 'text/plain' })
-                 downloadBlob('pavement-config.txt', blob)
-               }}
-             >
-               Export Text Report
-             </button>
         </div>
       )}
     </div>

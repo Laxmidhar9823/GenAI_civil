@@ -1526,6 +1526,28 @@ def _length_to_mm(value: float, unit: Optional[str]) -> float:
     return float(value) * multipliers.get(unit_lower, 1.0)
 
 
+def _compute_contact_pressure_q_mpa(
+    load_value: float,
+    load_unit: str,
+    contact_lx_mm: float,
+    contact_ly_mm: float,
+) -> float:
+    """Compute tire contact pressure q in MPa.
+
+    Uses the explicit conversion chain:
+    - area(m²) = (lx_mm * ly_mm) / 1_000_000
+    - pressure(MPa) = load(kN) / area(m²) / 1000
+
+    Note: This is numerically equivalent to N/mm², but kept explicit to
+    prevent unit-mismatch bugs when parsing mixed units.
+    """
+
+    unit_lower = (load_unit or "n").strip().lower()
+    load_kn = float(load_value) if unit_lower == "kn" else (float(load_value) / 1000.0)
+    area_m2 = max((float(contact_lx_mm) * float(contact_ly_mm)) / 1_000_000.0, 1e-12)
+    return load_kn / area_m2 / 1000.0
+
+
 def _extract_assumed_values(text: str) -> Dict[str, float]:
     key_map = {
         "emod": "Emod",
@@ -1653,10 +1675,17 @@ def _extract_engineering_candidates(text: str) -> Tuple[Dict[str, Any], Dict[str
         if direct_match:
             out[key] = float(direct_match.group(1))
 
-    load_match = re.search(
+    load_match: Optional[re.Match[str]] = None
+    load_patterns = [
         r"(?:each\s*wheel|per\s*wheel|wheel\s*load|(?:wheel\s*)?load)\s*[:=-]?\s*[^\d]{0,20}(\d+(?:\.\d+)?)\s*(kn|n)",
-        lowered,
-    )
+        r"\bload\b\s*(?:of\s*)?[:=-]?\s*(\d+(?:\.\d+)?)\s*(kn|n)\b",
+        r"(\d+(?:\.\d+)?)\s*(kn|n)\s*(?:each\s*wheel|per\s*wheel|wheel\s*)?load\b",
+    ]
+    for pattern in load_patterns:
+        candidate = re.search(pattern, lowered)
+        if candidate:
+            load_match = candidate
+            break
 
     area_match: Optional[re.Match[str]] = None
     area_patterns = [
@@ -1678,6 +1707,11 @@ def _extract_engineering_candidates(text: str) -> Tuple[Dict[str, Any], Dict[str
         area_lx_mm = _length_to_mm(float(area_match.group(1)), area_match.group(2))
         area_ly_mm = _length_to_mm(float(area_match.group(3)), area_match.group(4))
 
+    # If contact dimensions are provided but "load" isn't explicitly labeled,
+    # treat the first kN/N magnitude as the load.
+    if load_match is None and area_lx_mm is not None and area_ly_mm is not None:
+        load_match = re.search(r"\b(\d+(?:\.\d+)?)\s*(kn|n)\b(?!\s*/)", lowered)
+
     spacing_mm = _extract_spacing_mm(lowered)
     tandem_requested = bool(
         re.search(r"\btandem\s*axle\b|\btandem\b|\bdual\s*wheel\b|\bdouble\s*wheel\b", lowered)
@@ -1697,9 +1731,10 @@ def _extract_engineering_candidates(text: str) -> Tuple[Dict[str, Any], Dict[str
             load_value = float(case_match.group(1))
             load_unit = (case_match.group(2) or "n").lower()
             location = normalize_load_location(case_match.group(3)) or "interior"
-            load_n = load_value * 1000.0 if load_unit == "kn" else load_value
-            area_mm2 = max(area_lx_mm * area_ly_mm, 1e-9)
-            q_val = round(load_n / area_mm2, 5)
+            q_val = round(
+                _compute_contact_pressure_q_mpa(load_value, load_unit, area_lx_mm, area_ly_mm),
+                5,
+            )
             patch = infer_load_patch_from_contact_area(
                 location,
                 slab_a,
@@ -1722,9 +1757,10 @@ def _extract_engineering_candidates(text: str) -> Tuple[Dict[str, Any], Dict[str
     if number_of_wheels > 1 and load_match and area_lx_mm is not None and area_ly_mm is not None:
         load_value = float(load_match.group(1))
         load_unit = (load_match.group(2) or "n").lower()
-        load_n = load_value * 1000.0 if load_unit == "kn" else load_value
-        area_mm2 = max(area_lx_mm * area_ly_mm, 1e-9)
-        q_val = round(load_n / area_mm2, 5)
+        q_val = round(
+            _compute_contact_pressure_q_mpa(load_value, load_unit, area_lx_mm, area_ly_mm),
+            5,
+        )
 
         group_location = inferred_location or (normalize_load_location(out.get("load_location")) if isinstance(out.get("load_location"), str) else None) or "interior"
         spacing_for_group = spacing_mm if isinstance(spacing_mm, (int, float)) else float(area_lx_mm)
@@ -1748,9 +1784,10 @@ def _extract_engineering_candidates(text: str) -> Tuple[Dict[str, Any], Dict[str
     elif tandem_requested and inferred_location and load_match and area_lx_mm is not None and area_ly_mm is not None:
         load_value = float(load_match.group(1))
         load_unit = (load_match.group(2) or "n").lower()
-        load_n = load_value * 1000.0 if load_unit == "kn" else load_value
-        area_mm2 = max(area_lx_mm * area_ly_mm, 1e-9)
-        q_val = round(load_n / area_mm2, 5)
+        q_val = round(
+            _compute_contact_pressure_q_mpa(load_value, load_unit, area_lx_mm, area_ly_mm),
+            5,
+        )
 
         base_patch = infer_load_patch_from_contact_area(
             inferred_location,
@@ -1796,17 +1833,23 @@ def _extract_engineering_candidates(text: str) -> Tuple[Dict[str, Any], Dict[str
         out.update(patch)
 
     explicit_q = re.search(r"(?:pressure|\bq\b)\s*[:=-]?\s*(\d+(?:\.\d+)?)\s*(mpa|kpa|psi)?", lowered)
-    if explicit_q:
+    has_load_and_area = load_match is not None and area_lx_mm is not None and area_ly_mm is not None
+
+    # Priority (as required):
+    # 1) Load + area => compute pressure
+    # 2) Explicit pressure => use provided
+    # 3) Otherwise => leave missing (defaults handled elsewhere)
+    if has_load_and_area:
+        load_value = float(load_match.group(1))
+        load_unit = (load_match.group(2) or "n").lower()
+        out["q"] = round(
+            _compute_contact_pressure_q_mpa(load_value, load_unit, float(area_lx_mm), float(area_ly_mm)),
+            5,
+        )
+    elif explicit_q:
         out["q"] = float(explicit_q.group(1))
         if explicit_q.group(2):
             units["q"] = explicit_q.group(2)
-    elif load_match and area_lx_mm is not None and area_ly_mm is not None:
-        load_value = float(load_match.group(1))
-        load_unit = (load_match.group(2) or "n").lower()
-        load_n = load_value * 1000.0 if load_unit == "kn" else load_value
-
-        area_mm2 = max(area_lx_mm * area_ly_mm, 1e-9)
-        out["q"] = round(load_n / area_mm2, 5)
 
     # Explicit user assumptions should override inferred values.
     assumed_values = _extract_assumed_values(lowered)

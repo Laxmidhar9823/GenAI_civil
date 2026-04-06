@@ -17,7 +17,6 @@ const EDITABLE_KEYS = new Set([
   'x2',
   'y1',
   'y2',
-  'q',
   'mesh_type',
   'load_location',
 ])
@@ -100,7 +99,7 @@ export default function ParamsPanel(props: {
   }
 
   function canEditKey(key: string): boolean {
-    if (key === 'x' || key === 'y') return false
+    if (key === 'x' || key === 'y' || key === 'q') return false
     return EDITABLE_KEYS.has(key)
   }
 
@@ -202,7 +201,7 @@ export default function ParamsPanel(props: {
                         </div>
                       </td>
                       <td className="param-value-cell">
-                        {rowEditingKey === r.key ? (
+                        {rowEditingKey === r.key && canEditKey(r.key) ? (
                           <>
                             {r.key === 'mesh_type' ? (
                               <select
@@ -293,7 +292,7 @@ export default function ParamsPanel(props: {
                           </>
                         )}
 
-                        {rowEditingKey === r.key && rowEditError && (
+                        {rowEditingKey === r.key && canEditKey(r.key) && rowEditError && (
                           <div className="sub" style={{ marginTop: '6px', color: 'var(--danger)' }}>
                             {rowEditError}
                           </div>
@@ -301,7 +300,7 @@ export default function ParamsPanel(props: {
                       </td>
 
                       <td className="param-actions-cell">
-                        {rowEditingKey === r.key ? (
+                        {rowEditingKey === r.key && canEditKey(r.key) ? (
                           <div className="param-actions">
                             <button
                               type="button"

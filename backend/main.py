@@ -233,8 +233,18 @@ def reset() -> ResetResponse:
 def chat(req: ChatRequest) -> ChatResponse:
     state = req.state.model_copy(deep=True)
 
+    # Each prompt must be extracted from a clean parameter state (no carryover).
+    state.params = {}
+    state.user_provided_keys = []
+    state.current_asking = None
+    if state.mode != "welcome":
+        state.mode = "free"
+
     state.messages.append(Message(role="user", content=req.user_input))
-    context = build_conversation_context([m.model_dump() for m in state.messages], state.params)
+
+    # Build extraction context from only the current prompt to avoid reusing
+    # values from previous prompts via chat history.
+    context = build_conversation_context([state.messages[-1].model_dump()], {})
     lower_input = req.user_input.lower().strip()
 
     response = ""
@@ -272,7 +282,7 @@ def chat(req: ChatRequest) -> ChatResponse:
             )
 
         llm = get_ollama_llm(req.llm_config.ollama_url, effective_model, api_key=api_key)
-        result = process_user_input_with_llm(req.user_input, llm, context, state.params, state.current_asking)
+        result = process_user_input_with_llm(req.user_input, llm, context, {}, None)
 
         conversation_only = bool(result.get("conversation_only"))
 

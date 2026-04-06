@@ -618,7 +618,17 @@ PARAM_ALIASES = {
     "a": ["a", "length", "slab length", "x length", "x dimension", "slab dimensions", "slab size"],
     "b": ["b", "width", "slab width", "y length", "y dimension", "slab dimensions", "slab size"],
     "t": ["t", "thickness", "slab thickness", "depth"],
-    "Emod": ["emod", "modulus", "modulus of elasticity", "elasticity", "concrete grade", "compressive strength"],
+    "Emod": [
+        "emod",
+        "e",
+        "youngs modulus",
+        "young's modulus",
+        "modulus",
+        "modulus of elasticity",
+        "elasticity",
+        "concrete grade",
+        "compressive strength",
+    ],
     "nu": ["nu", "poisson", "poissons ratio", "poisson ratio"],
     "Kx": ["kx", "stiffness x", "foundation x", "subgrade modulus", "foundation modulus"],
     "Ky": ["ky", "stiffness y", "foundation y", "subgrade modulus", "foundation modulus"],
@@ -1396,13 +1406,76 @@ def _tokenize_for_numbers(text: str) -> List[str]:
     return "".join(cleaned_chars).split()
 
 
-def _parse_numeric_token(token: str) -> Optional[float]:
-    if token in {"", ".", "-", "-."}:
+_KNOWN_UNIT_TOKENS = {
+    # length
+    "mm",
+    "millimeter",
+    "millimeters",
+    "cm",
+    "m",
+    "meter",
+    "meters",
+    "ft",
+    "feet",
+    "foot",
+    "inch",
+    "inches",
+    # pressure
+    "mpa",
+    "kpa",
+    "psi",
+    # force (occasionally present in user text)
+    "n",
+    "kn",
+}
+
+
+_NUMBER_WITH_UNIT_RE = re.compile(r"^(-?\d+(?:\.\d+)?(?:e[+-]?\d+)?)([a-z%]+)?$")
+
+
+def _parse_number_token_with_unit(token: str) -> Optional[Tuple[float, Optional[str]]]:
+    """Parse a token that may contain a number with an attached unit.
+
+    Examples:
+    - "200" -> (200.0, None)
+    - "200mm" -> (200.0, "mm")
+    - "24.5mpa" -> (24.5, "mpa")
+    - "1e5" -> (100000.0, None)
+    """
+
+    tok = (token or "").strip().lower()
+    if tok in {"", ".", "-", "-."}:
         return None
+
+    match = _NUMBER_WITH_UNIT_RE.match(tok)
+    if not match:
+        return None
+
     try:
-        return float(token)
+        value = float(match.group(1))
     except ValueError:
         return None
+
+    unit = match.group(2)
+    return float(value), (unit.lower() if unit else None)
+
+
+def _extract_all_numbers_with_units(text: str) -> List[Tuple[float, Optional[str]]]:
+    """Return all numeric occurrences in token order, including inline units like 200mm."""
+
+    tokens = _tokenize_for_numbers(text)
+    out: List[Tuple[float, Optional[str]]] = []
+    for i, tok in enumerate(tokens):
+        parsed = _parse_number_token_with_unit(tok)
+        if not parsed:
+            continue
+        value, unit = parsed
+        if unit is None and i + 1 < len(tokens):
+            next_tok = tokens[i + 1]
+            if next_tok in _KNOWN_UNIT_TOKENS:
+                unit = next_tok
+        out.append((float(value), unit))
+    return out
 
 
 def _parse_node_list_candidates(text: str) -> Dict[str, List[float]]:
@@ -1750,11 +1823,15 @@ def parse_multi_param_candidates(text: str) -> Dict[str, Tuple[float, Optional[s
 
     numbers: List[Tuple[int, float, Optional[str]]] = []
     for i, tok in enumerate(tokens):
-        val = _parse_numeric_token(tok)
-        if val is None:
+        parsed = _parse_number_token_with_unit(tok)
+        if not parsed:
             continue
-        unit = tokens[i + 1] if i + 1 < len(tokens) and tokens[i + 1].isalpha() else None
-        numbers.append((i, val, unit))
+        val, unit = parsed
+        if unit is None and i + 1 < len(tokens):
+            next_tok = tokens[i + 1]
+            if next_tok in _KNOWN_UNIT_TOKENS:
+                unit = next_tok
+        numbers.append((i, float(val), unit))
 
     if not numbers:
         return {}
@@ -2029,8 +2106,8 @@ def process_user_input_with_llm(
         # Prefer deterministic engineering parsing for domain-specific fields when present.
         if key not in extracted_multiple:
             extracted_multiple[key] = value
-        if unit:
-            extracted_units[key] = unit
+            if unit:
+                extracted_units[key] = unit
     for key, values in node_list_candidates.items():
         extracted_multiple[key] = values
     extracted_units.update(engineering_units)
@@ -2039,13 +2116,84 @@ def process_user_input_with_llm(
         friendly = "Great details, thanks. I captured multiple values together."
         if semantic_choices and len(extracted_multiple) == len(semantic_choices):
             friendly = "Perfect, I captured that classification and will infer the detailed coordinates automatically."
+
+        understood_value: Optional[float] = None
+        original_unit: Optional[str] = None
+
+        # If the user included multiple values but only explicitly keyed some of them,
+        # preserve the remaining (unclaimed) number as the answer to the current question.
+        if (
+            current_asking
+            and current_asking not in extracted_multiple
+            and current_asking not in NODE_PARAM_KEYS
+            and current_asking not in {MESH_TYPE_KEY, LOAD_LOCATION_KEY}
+        ):
+            occurrences = _extract_all_numbers_with_units(user_input)
+
+            # Build numeric claims from extracted_multiple and try to match occurrences to those claims.
+            claims: List[Tuple[str, float]] = [
+                (key, float(val))
+                for key, val in extracted_multiple.items()
+                if isinstance(val, (int, float)) and key in PARAM_INFO
+            ]
+            used = [False] * len(claims)
+            leftovers: List[Tuple[float, Optional[str]]] = []
+
+            tol = 1e-9
+            for value, unit in occurrences:
+                matched = False
+                for idx, (key, claim_val) in enumerate(claims):
+                    if used[idx]:
+                        continue
+                    if abs(claim_val - float(value)) <= tol:
+                        used[idx] = True
+                        matched = True
+                        break
+                    if unit and key not in extracted_units:
+                        converted_value, _ = convert_to_standard_unit(float(value), unit, key)
+                        if abs(float(converted_value) - float(claim_val)) <= tol:
+                            used[idx] = True
+                            matched = True
+                            break
+                if not matched:
+                    leftovers.append((float(value), unit))
+
+            if leftovers:
+                stripped = user_input.strip().lower()
+                starts_with_number = bool(re.match(r"^-?\d", stripped))
+
+                tokens = _tokenize_for_numbers(user_input)
+                alias_hit = False
+                for alias in PARAM_ALIASES.get(current_asking, []):
+                    phrase_tokens = alias.split()
+                    if _find_phrase_indices(tokens, phrase_tokens):
+                        alias_hit = True
+                        break
+
+                expected_unit = str(PARAM_INFO.get(current_asking, {}).get("unit", "")).strip().lower()
+                alt_units = PARAM_INFO.get(current_asking, {}).get("alt_units", {}) or {}
+                compatible_units = {expected_unit} | {str(u).strip().lower() for u in alt_units.keys()}
+
+                chosen: Optional[Tuple[float, Optional[str]]] = None
+                for value, unit in leftovers:
+                    if unit and unit.strip().lower() in compatible_units:
+                        chosen = (float(value), unit)
+                        break
+
+                if chosen is None and (starts_with_number or alias_hit):
+                    chosen = (float(leftovers[0][0]), leftovers[0][1])
+
+                if chosen is not None:
+                    understood_value = float(chosen[0])
+                    original_unit = chosen[1]
+
         return {
-            "understood_value": None,
+            "understood_value": understood_value,
             "use_default": False,
             "use_all_defaults": False,
             "needs_clarification": False,
             "friendly_response": friendly,
-            "original_unit": None,
+            "original_unit": original_unit,
             "parameter_key": current_asking,
             "extracted_multiple": extracted_multiple,
             "extracted_units": extracted_units,

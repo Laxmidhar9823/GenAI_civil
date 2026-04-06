@@ -20,6 +20,7 @@ from backend.agent_logic import (
     convert_to_standard_unit,
     format_value_with_unit,
     generate_completion_message,
+    generate_autonomous_assistant_message,
     generate_interactive_followup,
     generate_welcome_message,
     validate_single_param,
@@ -233,22 +234,46 @@ def reset() -> ResetResponse:
 def chat(req: ChatRequest) -> ChatResponse:
     state = req.state.model_copy(deep=True)
 
-    # Each prompt must be extracted from a clean parameter state (no carryover).
-    state.params = {}
-    state.user_provided_keys = []
-    state.current_asking = None
-    if state.mode != "welcome":
-        state.mode = "free"
-
     state.messages.append(Message(role="user", content=req.user_input))
 
-    # Build extraction context from only the current prompt to avoid reusing
-    # values from previous prompts via chat history.
-    context = build_conversation_context([state.messages[-1].model_dump()], {})
+    # Build extraction context from recent conversation + collected params.
+    # This enables multi-turn, stateful assistance (values, corrections, and missing-info followups).
+    context = build_conversation_context([m.model_dump() for m in state.messages], state.params)
     lower_input = req.user_input.lower().strip()
 
     response = ""
     model_notice = ""
+
+    # Prepare LLM for both guided and free-form turns.
+    requested_model = req.llm_config.model
+    api_key = (req.llm_config.api_key or "").strip() or None
+    effective_model = requested_model
+    connected, model_available, available_models, _ = check_ollama_connection(
+        req.llm_config.ollama_url,
+        requested_model,
+        timeout_seconds=3.0,
+        api_key=api_key,
+    )
+
+    # If no API key is provided, prefer a likely-local model to avoid 401s on cloud models.
+    if connected and not api_key and available_models:
+        requested_norm = normalize_model_name(requested_model)
+        local_candidates = [m for m in available_models if "cloud" not in normalize_model_name(m)]
+        if "cloud" in requested_norm and local_candidates:
+            effective_model = local_candidates[0]
+            model_notice = (
+                f"No API key provided for cloud model '{requested_model}'. "
+                f"Using local model '{effective_model}' instead."
+            )
+
+    if connected and not model_available and available_models and effective_model == requested_model:
+        effective_model = available_models[0]
+        model_notice = (
+            f"Model '{requested_model}' is not installed on your Ollama server. "
+            f"Using available model '{effective_model}' instead."
+        )
+
+    llm = get_ollama_llm(req.llm_config.ollama_url, effective_model, api_key=api_key)
 
     if lower_input in ["let's begin", "lets begin", "start", "begin", "guide me", "help me"]:
         state.mode = "guided"
@@ -263,26 +288,29 @@ def chat(req: ChatRequest) -> ChatResponse:
                 "and I'll capture all of them at once.\n\n"
             )
             response += generate_interactive_followup(state.params)
-    else:
-        requested_model = req.llm_config.model
-        api_key = req.llm_config.api_key
-        effective_model = requested_model
-        connected, model_available, available_models, _ = check_ollama_connection(
-            req.llm_config.ollama_url,
-            requested_model,
-            timeout_seconds=3.0,
-            api_key=api_key,
+
+        # Narrate guided start via the LLM (fallback: deterministic text above).
+        response = generate_autonomous_assistant_message(
+            llm=llm,
+            user_input=req.user_input,
+            mode=state.mode,
+            params=state.params,
+            applied_keys=[],
+            inference_notes=[],
+            conversion_notes=[],
+            problems=[],
+            current_asking=state.current_asking,
+            conversation_only=True,
+            fallback_message=response,
         )
-
-        if connected and not model_available and available_models:
-            effective_model = available_models[0]
-            model_notice = (
-                f"Model '{requested_model}' is not installed on your Ollama server. "
-                f"Using available model '{effective_model}' instead."
-            )
-
-        llm = get_ollama_llm(req.llm_config.ollama_url, effective_model, api_key=api_key)
-        result = process_user_input_with_llm(req.user_input, llm, context, {}, None)
+    else:
+        result = process_user_input_with_llm(
+            req.user_input,
+            llm,
+            context,
+            state.params,
+            state.current_asking,
+        )
 
         conversation_only = bool(result.get("conversation_only"))
 
@@ -386,6 +414,21 @@ def chat(req: ChatRequest) -> ChatResponse:
             if inference_notes:
                 response += "\n".join(f"- {note}" for note in inference_notes) + "\n\n"
             response += generate_completion_message(state.params, state.user_provided_keys)
+
+            # Let the LLM narrate the completed state (fallback: deterministic completion message above).
+            response = generate_autonomous_assistant_message(
+                llm=llm,
+                user_input=req.user_input,
+                mode=state.mode,
+                params=state.params,
+                applied_keys=list(prefill_explicit_keys),
+                inference_notes=inference_notes,
+                conversion_notes=[],
+                problems=[],
+                current_asking=state.current_asking,
+                conversation_only=conversation_only,
+                fallback_message=response,
+            )
         else:
             updates: Dict[str, object] = {}
             explicit_keys = set()
@@ -554,6 +597,22 @@ def chat(req: ChatRequest) -> ChatResponse:
                     "I want to make sure I understood you correctly. "
                     "Please share any values you know, and I can capture several at once."
                 )
+
+            # Replace the mostly hard-coded assembly above with an autonomous LLM narration.
+            # If the LLM is unavailable, we keep the deterministic response as fallback.
+            response = generate_autonomous_assistant_message(
+                llm=llm,
+                user_input=req.user_input,
+                mode=state.mode,
+                params=state.params,
+                applied_keys=applied,
+                inference_notes=inference_notes,
+                conversion_notes=conversion_notes,
+                problems=problems,
+                current_asking=state.current_asking,
+                conversation_only=conversation_only,
+                fallback_message=response,
+            )
 
     if model_notice:
         response = f"{model_notice}\n\n{response}".strip()

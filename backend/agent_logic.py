@@ -60,6 +60,7 @@ PARAM_INFO = {
         "name": "Concrete Stiffness",
         "technical_name": "Modulus of Elasticity",
         "unit": "MPa",
+        "alt_units": {"gpa": 1000.0},
         "category": "Material Properties",
         "simple_explanation": "How stiff or rigid the concrete is. Higher values mean stiffer concrete that bends less under load.",
         "typical_range": "20,000 - 35,000 MPa for concrete pavements",
@@ -588,6 +589,7 @@ PARAM_CATEGORIES = {
 PARAM_ORDER = ["a", "b", "mesh_type", "t", "Emod", "nu", "Kx", "Ky", "Kz", "load_location", "q"]
 
 LLM_INVOKE_TIMEOUT_SECONDS = 8.0
+LLM_NARRATION_TIMEOUT_SECONDS = 18.0
 
 USE_ALL_DEFAULTS_PATTERNS = [
     "use defaults",
@@ -1424,6 +1426,8 @@ _KNOWN_UNIT_TOKENS = {
     "mpa",
     "kpa",
     "psi",
+    # stiffness / modulus
+    "gpa",
     # force (occasionally present in user text)
     "n",
     "kn",
@@ -2496,3 +2500,231 @@ def build_final_configuration(params: Dict[str, Any]) -> Dict[str, Any]:
             "q": [case["q"] for case in normalized_load_cases],
         },
     }
+
+
+def _clean_llm_text(text: str) -> str:
+    content = (text or "").strip()
+    if not content:
+        return ""
+
+    # Strip common fenced blocks.
+    if content.startswith("```"):
+        first_newline = content.find("\n")
+        if first_newline != -1:
+            content = content[first_newline + 1 :]
+        if content.endswith("```"):
+            content = content[:-3]
+        content = content.strip()
+
+    return content
+
+
+def _render_param_value_for_prompt(key: str, value: Any) -> str:
+    try:
+        return format_value_with_unit(value, key)
+    except Exception:
+        return str(value)
+
+
+def _render_known_params_for_prompt(params: Dict[str, Any]) -> str:
+    if not params:
+        return "- (none yet)"
+
+    lines: List[str] = []
+    ordered = list(PARAM_ORDER)
+    for extra in ["x", "y", "x1", "x2", "y1", "y2"]:
+        if extra in params and extra not in ordered:
+            ordered.append(extra)
+
+    for key in ordered:
+        if key not in params:
+            continue
+        if key not in PARAM_INFO:
+            continue
+        info = PARAM_INFO.get(key, {})
+        name = str(info.get("name", key))
+        lines.append(f"- {name}: {_render_param_value_for_prompt(key, params.get(key))}")
+
+    return "\n".join(lines) if lines else "- (none yet)"
+
+
+def _render_applied_for_prompt(params: Dict[str, Any], applied_keys: List[str]) -> str:
+    if not applied_keys:
+        return "- (no parameter updates detected in this message)"
+
+    lines: List[str] = []
+    for key in applied_keys:
+        if key not in PARAM_INFO:
+            continue
+        info = PARAM_INFO.get(key, {})
+        name = str(info.get("name", key))
+        lines.append(f"- {name}: {_render_param_value_for_prompt(key, params.get(key))}")
+
+    return "\n".join(lines)
+
+
+def _next_question_context(current_asking: Optional[str]) -> str:
+    if not current_asking or current_asking not in PARAM_INFO:
+        return "(none)"
+
+    info = PARAM_INFO[current_asking]
+    name = str(info.get("name", current_asking))
+    tech = str(info.get("technical_name", "")).strip()
+    unit = str(info.get("unit", "")).strip()
+    typical = str(info.get("typical_range", "")).strip()
+    example = str(info.get("example", "")).strip()
+    default_rendered = _render_param_value_for_prompt(current_asking, get_default_value(current_asking))
+
+    extra = ""
+    if current_asking == "Emod":
+        extra = "Alternative: tell me concrete grade (e.g., M30 / fck=30 MPa) and I can compute Elastic Modulus." 
+    elif current_asking == "q":
+        extra = "Alternative: give wheel load (kN) + contact patch size (e.g., 200×300 mm) and I can compute tire pressure." 
+
+    parts = [
+        f"Parameter needed next: {name}",
+        f"Technical name: {tech}" if tech else "",
+        f"Unit: {unit}" if unit and unit != "(no unit)" else "",
+        f"Typical range: {typical}" if typical else "",
+        f"Example: {example}" if example else "",
+        f"Safe default available: {default_rendered}",
+        extra,
+    ]
+    return "\n".join(p for p in parts if p)
+
+
+def create_autonomous_response_system_prompt() -> str:
+    return (
+        "You are an expert rigid pavement (concrete pavement) assistant. "
+        "You help the user set up analysis inputs, detect what is missing, and ask for the next needed detail.\n\n"
+        "Hard rules:\n"
+        "- Do NOT invent or guess numeric values. Use only confirmed values provided in the prompt context.\n"
+        "- Do NOT expose internal parameter keys, JSON, schema names, or code details.\n"
+        "- If something is missing, ask ONE focused follow-up question (user may reply with multiple values).\n"
+        "- If there are validation issues, ask the user to correct them before continuing.\n"
+        "- Keep the response concise, friendly, and practical. Use Markdown.\n"
+    )
+
+
+def create_autonomous_response_prompt(
+    *,
+    user_input: str,
+    mode: str,
+    params: Dict[str, Any],
+    applied_keys: List[str],
+    inference_notes: List[str],
+    conversion_notes: List[str],
+    problems: List[str],
+    current_asking: Optional[str],
+    conversation_only: bool,
+) -> str:
+    missing = [k for k in PARAM_ORDER if k not in params]
+    missing_names = [str(PARAM_INFO[k].get("name", k)) for k in missing if k in PARAM_INFO]
+
+    explain_key = _extract_param_key_from_text(user_input) or current_asking
+    explanation_seed = ""
+    if conversation_only and explain_key and explain_key in PARAM_INFO:
+        # Provide a safe reference block that the model may paraphrase.
+        explanation_seed = _parameter_explanation(explain_key)
+
+    segments: List[str] = [
+        f"### USER MESSAGE\n{user_input}\n\n",
+        f"### MODE\n{mode}\n\n",
+        f"### CONVERSATION-ONLY\n{conversation_only}\n\n",
+        f"### CONFIRMED PARAMETERS (current)\n{_render_known_params_for_prompt(params)}\n\n",
+        f"### UPDATES CAPTURED THIS TURN\n{_render_applied_for_prompt(params, applied_keys)}\n\n",
+        "### UNIT CONVERSIONS (already applied)\n"
+        + ("\n".join(f"- {n}" for n in conversion_notes) if conversion_notes else "- (none)")
+        + "\n\n",
+        "### ENGINEERING INFERENCES (already applied)\n"
+        + ("\n".join(f"- {n}" for n in inference_notes) if inference_notes else "- (none)")
+        + "\n\n",
+        "### VALIDATION ISSUES\n" + ("\n".join(f"- {p}" for p in problems) if problems else "- (none)") + "\n\n",
+        "### MISSING REQUIRED INPUTS\n"
+        + ("\n".join(f"- {n}" for n in missing_names) if missing_names else "- (none)")
+        + "\n\n",
+        f"### NEXT QUESTION CONTEXT\n{_next_question_context(current_asking)}\n\n",
+    ]
+
+    if explanation_seed:
+        segments.append(
+            "### REFERENCE EXPLANATION (ground truth; paraphrase this)\n" + explanation_seed + "\n\n"
+        )
+
+    segments.append(
+        "### TASK\n"
+        "Write the assistant reply.\n"
+        "- Confirm what changed (if anything).\n"
+        "- Mention inferences/conversions briefly (only if relevant).\n"
+        "- If there are issues, ask the user to fix them.\n"
+        "- Else if not complete, ask ONE focused question for the next needed input.\n"
+        "- Else, confirm completion and tell the user to review/export from the side panel.\n"
+        "Do not output JSON.\n"
+    )
+
+    return "".join(segments)
+
+
+def generate_autonomous_assistant_message(
+    *,
+    llm: Optional[ChatOllama],
+    user_input: str,
+    mode: str,
+    params: Dict[str, Any],
+    applied_keys: List[str],
+    inference_notes: List[str],
+    conversion_notes: List[str],
+    problems: List[str],
+    current_asking: Optional[str],
+    conversation_only: bool,
+    fallback_message: str,
+    timeout_seconds: float = LLM_NARRATION_TIMEOUT_SECONDS,
+) -> str:
+    """Generate the user-visible assistant message.
+
+    This keeps deterministic extraction/validation/calculation as the source of truth, and uses the LLM
+    only to narrate the state (what was captured, inferred, what is missing, and the next question).
+    """
+
+    if llm is None:
+        return fallback_message
+
+    try:
+        system = SystemMessage(content=create_autonomous_response_system_prompt())
+        prompt = create_autonomous_response_prompt(
+            user_input=user_input,
+            mode=mode,
+            params=params,
+            applied_keys=applied_keys,
+            inference_notes=inference_notes,
+            conversion_notes=conversion_notes,
+            problems=problems,
+            current_asking=current_asking,
+            conversation_only=conversation_only,
+        )
+        human = HumanMessage(content=prompt)
+        response = _invoke_llm_with_timeout(llm, [system, human], timeout_seconds=timeout_seconds)
+        if response and getattr(response, "content", None):
+            cleaned = _clean_llm_text(str(response.content))
+            return cleaned or fallback_message
+        return fallback_message
+    except TimeoutError:
+        return fallback_message
+    except Exception as exc:
+        err_text = str(exc).strip()
+        lowered_err = err_text.lower()
+
+        if "unauthorized" in lowered_err or "status code: 401" in lowered_err:
+            return (
+                "I couldn’t use the selected Ollama model because the request is unauthorized (401). "
+                "If you selected a cloud model, add an API key in Settings (left panel), or switch to a local model.\n\n"
+                + fallback_message
+            )
+
+        if "cannot reach ollama" in lowered_err or "connection" in lowered_err:
+            return (
+                "I couldn’t reach your Ollama server. Please ensure Ollama is running and the URL is correct.\n\n"
+                + fallback_message
+            )
+
+        return fallback_message

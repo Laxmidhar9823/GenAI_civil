@@ -6,11 +6,13 @@ export default function OllamaSettings(props: {
   setOllamaUrl: (v: string) => void
   model: string
   setModel: (v: string) => void
+  apiKey: string
+  setApiKey: (v: string) => void
   status: OllamaCheckState
   onCheckNow: () => void
   apiBaseUrl: string
 }) {
-  const { ollamaUrl, setOllamaUrl, model, setModel, status, onCheckNow } = props
+  const { ollamaUrl, setOllamaUrl, model, setModel, apiKey, setApiKey, status, onCheckNow } = props
 
   return (
     <div className="card">
@@ -45,6 +47,21 @@ export default function OllamaSettings(props: {
               value={model}
               onChange={(e) => setModel(e.target.value)}
               placeholder="qwen3.5:cloud"
+              autoComplete="off"
+            />
+          </div>
+
+          <div>
+            <label className="label" htmlFor="ollamaApiKey">
+              API Key (optional)
+            </label>
+            <input
+              id="ollamaApiKey"
+              className="input"
+              type="password"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder="Paste your Ollama Cloud API key"
               autoComplete="off"
             />
           </div>

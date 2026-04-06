@@ -142,10 +142,13 @@ export async function apiHealth(): Promise<{ status: string; service?: string; v
   return fetchJson('/health')
 }
 
-export async function apiOllamaStatus(params: { ollama_url: string; model: string }): Promise<OllamaStatusResponse> {
+export async function apiOllamaStatus(params: { ollama_url: string; model: string; api_key?: string }): Promise<OllamaStatusResponse> {
   const q = new URLSearchParams({
     ollama_url: params.ollama_url,
     model: params.model,
   }).toString()
-  return fetchJson<OllamaStatusResponse>(`/ollama/status?${q}`)
+  const apiKey = (params.api_key || '').trim()
+  return fetchJson<OllamaStatusResponse>(`/ollama/status?${q}`, {
+    headers: apiKey ? { 'x-ollama-api-key': apiKey } : undefined,
+  })
 }

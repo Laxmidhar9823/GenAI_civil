@@ -68,6 +68,7 @@ export default function AssistantPage() {
   const [backendHealthy, setBackendHealthy] = useState<boolean | null>(null)
   const [ollamaUrl, setOllamaUrl] = useState(() => localStorage.getItem('ollamaUrl') || 'http://localhost:11434')
   const [model, setModel] = useState(() => localStorage.getItem('ollamaModel') || 'qwen3.5:cloud')
+  const [apiKey, setApiKey] = useState(() => localStorage.getItem('ollamaApiKey') || '')
   const [ollamaStatus, setOllamaStatus] = useState<OllamaCheckState>({ kind: 'unknown' })
 
   const emptyConversationState: ConversationState = {
@@ -82,6 +83,7 @@ export default function AssistantPage() {
   // Effects to persist settings
   useEffect(() => { localStorage.setItem('ollamaUrl', ollamaUrl) }, [ollamaUrl])
   useEffect(() => { localStorage.setItem('ollamaModel', model) }, [model])
+  useEffect(() => { localStorage.setItem('ollamaApiKey', apiKey) }, [apiKey])
 
   const paramInfo = useMemo(() => extractParamInfo(schema), [schema])
   const collected = useMemo(() => extractCollectedParams(state), [state])
@@ -162,7 +164,7 @@ export default function AssistantPage() {
   const checkOllama = useCallback(async () => {
     setOllamaStatus({ kind: 'checking' })
     try {
-      const res = await apiOllamaStatus({ ollama_url: ollamaUrl, model })
+      const res = await apiOllamaStatus({ ollama_url: ollamaUrl, model, api_key: apiKey || undefined })
 
       if (res.error) {
         setOllamaStatus({
@@ -196,7 +198,8 @@ export default function AssistantPage() {
     } catch (e) {
       setOllamaStatus({ kind: 'error', detail: (e as Error).message })
     }
-  }, [ollamaUrl, model])
+  }, [ollamaUrl, model, apiKey])
+
 
   // Initial check of Ollama if backend is healthy
   useEffect(() => {
@@ -232,6 +235,7 @@ export default function AssistantPage() {
         llm_config: {
           ollama_url: ollamaUrl,
           model,
+          api_key: apiKey || undefined,
         },
       })
 
@@ -349,6 +353,8 @@ export default function AssistantPage() {
             setOllamaUrl={setOllamaUrl}
             model={model}
             setModel={setModel}
+            apiKey={apiKey}
+            setApiKey={setApiKey}
             status={ollamaStatus}
             onCheckNow={checkOllama}
             apiBaseUrl="http://localhost:8000"

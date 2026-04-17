@@ -105,6 +105,50 @@ Backend endpoints:
 - `POST /reset`
 - `POST /chat`
 
+### VTK Result Workflow
+
+1. Complete the assistant conversation and export the final JSON (nested `nodes/slab/subgrade/loads`).
+2. Run the solver with that JSON as direct input:
+
+```bash
+python3 DOF5_07.09.2025.py path/to/pavement-config.json
+```
+
+3. Output files are generated in `output_python_square/`:
+- `results.txt`
+- `summary_results.txt`
+- `results.vtk`
+
+### Querying VTK Results from Python Scripts
+
+Detailed report (fields, tuple counts, stats per component):
+
+```bash
+python3 backend/scripts/vtk_detailed_report.py --file output_python_square/results.vtk --pretty
+```
+
+Aggregation query examples:
+
+```bash
+python3 backend/scripts/vtk_aggregate_query.py --file output_python_square/results.vtk --field w --agg mean
+python3 backend/scripts/vtk_aggregate_query.py --file output_python_square/results.vtk --field sxx_top --agg max
+python3 backend/scripts/vtk_aggregate_query.py --file output_python_square/results.vtk --field displacement --agg p95 --component magnitude
+```
+
+Supported aggregations:
+- `mean`, `max`, `min`, `sum`, `std`, `var`, `median`, `p95`, `p05`, `count`
+
+### VTK Lookup Agent in Chat
+
+The backend chat now includes a VTK lookup router. In the same conversation, users can ask things like:
+
+- `analyze vtk output_python_square/results.vtk`
+- `what is the mean deflection in vtk?`
+- `max sxx_top from vtk`
+- `p95 displacement magnitude in output_python_square/results.vtk`
+
+The backend will pick the right VTK script, execute it, and return a clean aggregated result in chat.
+
 Backend environment variables:
 - `BACKEND_CORS_ORIGINS` (comma-separated) to override allowed CORS origins.
   - Defaults remain local dev origins (`localhost:3000`, `5173`, `5174`, `5175`, `8080`, `8501`) when not set.

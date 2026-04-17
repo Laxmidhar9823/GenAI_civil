@@ -33,6 +33,7 @@ from backend.agent_logic import (
     find_first_inconsistent_param,
     get_default_value,
     apply_implicit_inferences,
+    check_physical_feasibility,
     normalize_load_location,
     normalize_mesh_type,
     with_progress_tail,
@@ -158,6 +159,52 @@ async def global_exception_handler(request: Request, exc: Exception):
         )
     )
     return JSONResponse(status_code=500, content=err.model_dump())
+
+
+def _determine_next_state(
+    state: ConversationState,
+    applied: List[str],
+    applied_load_cases: bool,
+    problems: List[str],
+    conversation_only: bool,
+    response_ref: List[str],  # mutable single-element list so caller sees the updated response
+) -> None:
+    """Mutate state.mode and state.current_asking based on current collected params.
+
+    Also updates response_ref[0] with a follow-up / completion message when
+    the mode advances or stays in guided mode after a data turn.
+    """
+    if conversation_only and not applied and not applied_load_cases and not problems:
+        if state.mode == "welcome":
+            state.mode = "free"
+        # Free / guided modes keep their current_asking unchanged for LLM context.
+        return
+
+    bad = find_first_inconsistent_param(state.params)
+    if bad:
+        bad_key, bad_msg = bad
+        response_ref[0] = f"⚠️ One thing to fix before we continue: {bad_msg}\n\n"
+        response_ref[0] += (
+            f"Please update **{PARAM_INFO[bad_key]['name']}**, or say "
+            f"'default' to use **{format_value_with_unit(get_default_value(bad_key), bad_key)}**."
+        )
+        state.current_asking = bad_key
+        # Preserve free mode — only promote to guided if user was in welcome/guided.
+        if state.mode != "free":
+            state.mode = "guided"
+        return
+
+    missing = [k for k in PARAM_ORDER if k not in state.params]
+    if missing:
+        state.current_asking = missing[0]
+        # Free mode stays free; current_asking is still set so the LLM knows what's next.
+        if state.mode not in ("free",):
+            state.mode = "guided"
+        response_ref[0] = f"{response_ref[0]}\n\n{generate_interactive_followup(state.params)}".strip()
+    else:
+        state.current_asking = None
+        state.mode = "complete"
+        response_ref[0] = f"{response_ref[0]}\n\n{generate_completion_message(state.params, state.user_provided_keys)}".strip()
 
 
 def _trim_messages(state: ConversationState, max_messages: int = 50, memory_max_chars: int = 20000) -> None:
@@ -612,6 +659,7 @@ def chat(req: ChatRequest) -> ChatResponse:
                 state.params[key] = get_default_value(key)
 
             _, inference_notes = apply_implicit_inferences(state.params, state.user_provided_keys)
+            inference_notes.extend(check_physical_feasibility(state.params))
 
             state.mode = "complete"
             if missing:
@@ -735,7 +783,15 @@ def chat(req: ChatRequest) -> ChatResponse:
                     if key in explicit_keys and key not in default_applied_keys and key not in state.user_provided_keys:
                         state.user_provided_keys.append(key)
 
+                # When multi-wheel load_cases were applied, mark load coord keys as user-provided
+                # so apply_implicit_inferences() doesn't overwrite them with the 20% heuristic.
+                if applied_load_cases:
+                    for k in ["x1", "x2", "y1", "y2", "load_cases"]:
+                        if k not in state.user_provided_keys:
+                            state.user_provided_keys.append(k)
+
                 inferred_keys, inference_notes = apply_implicit_inferences(state.params, state.user_provided_keys)
+                inference_notes.extend(check_physical_feasibility(state.params))
                 for inferred_key in inferred_keys:
                     if inferred_key in tentative:
                         tentative[inferred_key] = state.params[inferred_key]
@@ -772,33 +828,18 @@ def chat(req: ChatRequest) -> ChatResponse:
 
                 response = "\n\n".join(p for p in parts if p)
 
-            # If this turn was clearly conversational (e.g., "hi", "what is Kz?"),
-            # do NOT force the user into the guided data-entry flow.
-            if conversation_only and not applied and not applied_load_cases and not problems and not default_applied_keys:
-                if state.mode == "welcome":
-                    state.mode = "free"
-                # Keep current_asking as-is (if we were already in guided mode).
-            else:
-                bad = find_first_inconsistent_param(state.params)
-                if bad:
-                    bad_key, bad_msg = bad
-                    response = f"⚠️ One thing to fix before we continue: {bad_msg}\n\n"
-                    response += (
-                        f"Please update **{PARAM_INFO[bad_key]['name']}**, or say "
-                        f"'default' to use **{format_value_with_unit(get_default_value(bad_key), bad_key)}**."
-                    )
-                    state.current_asking = bad_key
-                    state.mode = "guided"
-                else:
-                    missing = [k for k in PARAM_ORDER if k not in state.params]
-                    if missing:
-                        state.current_asking = missing[0]
-                        state.mode = "guided"
-                        response = f"{response}\n\n{generate_interactive_followup(state.params)}".strip()
-                    else:
-                        state.current_asking = None
-                        state.mode = "complete"
-                        response = f"{response}\n\n{generate_completion_message(state.params, state.user_provided_keys)}".strip()
+            # Determine next state (mode, current_asking) and append follow-up text to response.
+            _conv_only_for_state = conversation_only and not default_applied_keys
+            response_ref = [response]
+            _determine_next_state(
+                state,
+                applied=applied,
+                applied_load_cases=applied_load_cases,
+                problems=problems,
+                conversation_only=_conv_only_for_state,
+                response_ref=response_ref,
+            )
+            response = response_ref[0]
 
             if not response:
                 response = (

@@ -73,7 +73,7 @@ PARAM_INFO = {
         "unit": "(no unit)",
         "category": "Material Properties",
         "simple_explanation": "How much the concrete squeezes sideways when pressed down. It's always between 0 and 0.5.",
-        "typical_range": "0.15 - 0.2 for concrete",
+        "typical_range": "0.15 – 0.25 for concrete (IS 456); typical pavement: 0.15 – 0.20",
         "example": "For most concrete, use 0.18 as a standard value",
         "icon": "📐",
     },
@@ -919,6 +919,57 @@ def _nearest_mesh_point(value: float, nodes: List[float]) -> float:
     return float(min(nodes, key=lambda node: abs(float(node) - float(value))))
 
 
+def _compute_patch_from_description(
+    text: str,
+    slab_a: float,
+    slab_b: float,
+    contact_lx_mm: float,
+    contact_ly_mm: float,
+    load_location: Optional[str] = None,
+) -> Optional[Dict[str, float]]:
+    """Derive exact patch coordinates from a natural-language description.
+
+    Priority order:
+    1. Explicit edge distances ("1m from left edge, 2m from bottom")
+    2. Named location + actual contact dims via infer_load_patch_from_contact_area()
+    3. "center of slab" / "middle of slab" shorthand
+
+    Returns None when there is insufficient information (callers fall back to
+    infer_load_patch_from_location() which uses the 20% heuristic).
+    """
+    lowered = text.lower()
+
+    # Priority 1: explicit edge distances
+    distances = _extract_edge_distances_mm(text)
+    if distances:
+        cx = slab_a / 2.0
+        cy = slab_b / 2.0
+        if "left" in distances:
+            cx = float(distances["left"])
+        elif "right" in distances:
+            cx = slab_a - float(distances["right"])
+        if "bottom" in distances:
+            cy = float(distances["bottom"])
+        elif "top" in distances:
+            cy = slab_b - float(distances["top"])
+        return _center_to_patch(cx, cy, contact_lx_mm, contact_ly_mm)
+
+    # Priority 2: named location
+    resolved = normalize_load_location(load_location or "")
+    if not resolved:
+        resolved = infer_semantic_choices(text).get(LOAD_LOCATION_KEY)
+    if resolved:
+        return infer_load_patch_from_contact_area(
+            resolved, slab_a, slab_b, contact_lx_mm, contact_ly_mm, text
+        )
+
+    # Priority 3: "center of slab" / "middle" shorthand
+    if re.search(r"\bcenter\s*of\s*slab\b|\bmiddle\s*of\s*slab\b|\bslab\s*center\b", lowered):
+        return _center_to_patch(slab_a / 2.0, slab_b / 2.0, contact_lx_mm, contact_ly_mm)
+
+    return None
+
+
 def _build_group_wheel_load_cases(
     number_of_wheels: int,
     spacing_mm: float,
@@ -1158,16 +1209,27 @@ def apply_implicit_inferences(params: Dict[str, Any], user_provided_keys: List[s
 
     load_keys = ["x1", "x2", "y1", "y2"]
     if LOAD_LOCATION_KEY in params and not any(k in user_provided_keys for k in load_keys):
-        location = normalize_load_location(params[LOAD_LOCATION_KEY]) or "interior"
-        inferred_load = infer_load_patch_from_location(location, slab_a, slab_b)
-        changed = False
-        for key, value in inferred_load.items():
-            if params.get(key) != value:
-                params[key] = value
-                applied.append(key)
-                changed = True
-        if changed:
-            notes.append(f"Inferred load patch coordinates for '{location}' location.")
+        # Skip inference if multi-wheel load_cases already computed — don't overwrite them.
+        if isinstance(params.get("load_cases"), list) and params["load_cases"]:
+            pass
+        else:
+            location = normalize_load_location(params[LOAD_LOCATION_KEY]) or "interior"
+            contact_lx = params.get("_contact_lx_mm")
+            contact_ly = params.get("_contact_ly_mm")
+            if contact_lx is not None and contact_ly is not None:
+                inferred_load = infer_load_patch_from_contact_area(
+                    location, slab_a, slab_b, float(contact_lx), float(contact_ly)
+                )
+            else:
+                inferred_load = infer_load_patch_from_location(location, slab_a, slab_b)
+            changed = False
+            for key, value in inferred_load.items():
+                if params.get(key) != value:
+                    params[key] = value
+                    applied.append(key)
+                    changed = True
+            if changed:
+                notes.append(f"Inferred load patch coordinates for '{location}' location.")
 
     return applied, notes
 
@@ -1209,6 +1271,10 @@ def format_value_with_unit(value: Any, param_key: str) -> str:
 
 def validate_single_param(key: str, value: Any, all_params: Dict[str, Any]) -> Tuple[bool, str]:
     """Validate a single parameter value."""
+    # Private/internal keys (prefixed with _) are computation artefacts; skip validation.
+    if key.startswith("_"):
+        return True, ""
+
     info = PARAM_INFO.get(key, {})
 
     if key in NODE_PARAM_KEYS:
@@ -1253,8 +1319,8 @@ def validate_single_param(key: str, value: Any, all_params: Dict[str, Any]) -> T
         return False, "This value must be greater than zero."
     if key in ["Kx", "Ky", "Kz"] and value < 0:
         return False, "This value cannot be negative."
-    if key == "nu" and (value < 0.15 or value > 0.2):
-        return False, "For concrete pavements, use a Poisson's ratio between 0.15 and 0.2."
+    if key == "nu" and (value < 0 or value >= 0.5):
+        return False, "Poisson's ratio must be between 0 and 0.5 (physical limit for any material). For concrete pavements, 0.15–0.20 is typical."
     if key == "x1" and "a" in all_params and value > all_params["a"]:
         return False, f"This can't be larger than your slab length ({all_params['a']} mm)."
     if key == "x2" and "a" in all_params and value > all_params["a"]:
@@ -1285,6 +1351,39 @@ def find_first_inconsistent_param(params: Dict[str, Any]) -> Optional[Tuple[str,
             if not ok:
                 return key, msg
     return None
+
+
+def check_physical_feasibility(params: Dict[str, Any]) -> List[str]:
+    """Return soft engineering-feasibility warnings (not hard errors).
+
+    These are passed as inference_notes to the LLM narration so the assistant
+    can mention them conversationally without blocking the workflow.
+    """
+    warnings_list: List[str] = []
+    a = float(params.get("a", 0))
+    b = float(params.get("b", 0))
+    t = float(params.get("t", 0))
+    q = float(params.get("q", 0))
+
+    if 0 < a < 1000:
+        warnings_list.append(f"Slab length {a:.0f} mm seems very small (typical minimum ~1000 mm).")
+    if 0 < b < 1000:
+        warnings_list.append(f"Slab width {b:.0f} mm seems very small (typical minimum ~1000 mm).")
+    if 0 < t < 100:
+        warnings_list.append(f"Slab thickness {t:.0f} mm is too thin (typical minimum 150 mm for pavements).")
+    if t > 600:
+        warnings_list.append(f"Slab thickness {t:.0f} mm is unusually large — please verify.")
+    if 0 < q > 0.7:
+        warnings_list.append(
+            f"Contact pressure {q:.3f} MPa exceeds 0.7 MPa (typical upper bound for highway tyres). "
+            "Please check load value and contact area."
+        )
+    if q > 2.0:
+        warnings_list.append(
+            f"Contact pressure {q:.3f} MPa is extremely high — possible unit error "
+            "(e.g., kN entered as N, or area in m² instead of mm²)."
+        )
+    return warnings_list
 
 
 def get_friendly_param_question(key: str, params: Dict[str, Any]) -> str:
@@ -1553,6 +1652,11 @@ def _length_to_mm(value: float, unit: Optional[str]) -> float:
         "m": 1000.0,
         "meter": 1000.0,
         "meters": 1000.0,
+        "ft": 304.8,
+        "feet": 304.8,
+        "foot": 304.8,
+        "inch": 25.4,
+        "inches": 25.4,
     }
     return float(value) * multipliers.get(unit_lower, 1.0)
 
@@ -1573,8 +1677,19 @@ def _compute_contact_pressure_q_mpa(
     prevent unit-mismatch bugs when parsing mixed units.
     """
 
+    _LOAD_TO_KN = {
+        "kn": 1.0,
+        "n": 0.001,
+        "kgf": 0.00981,
+        "kg": 0.00981,
+        "t": 9.81,
+        "ton": 9.81,
+        "tons": 9.81,
+        "tonne": 9.81,
+        "tonnes": 9.81,
+    }
     unit_lower = (load_unit or "n").strip().lower()
-    load_kn = float(load_value) if unit_lower == "kn" else (float(load_value) / 1000.0)
+    load_kn = float(load_value) * _LOAD_TO_KN.get(unit_lower, 1.0)
     area_m2 = max((float(contact_lx_mm) * float(contact_ly_mm)) / 1_000_000.0, 1e-12)
     return load_kn / area_m2 / 1000.0
 
@@ -1707,10 +1822,11 @@ def _extract_engineering_candidates(text: str) -> Tuple[Dict[str, Any], Dict[str
             out[key] = float(direct_match.group(1))
 
     load_match: Optional[re.Match[str]] = None
+    _LOAD_UNIT_PAT = r"(kn|n|t\b|ton|tons|tonne|tonnes|kg|kgf)"
     load_patterns = [
-        r"(?:each\s*wheel|per\s*wheel|wheel\s*load|(?:wheel\s*)?load)\s*[:=-]?\s*[^\d]{0,20}(\d+(?:\.\d+)?)\s*(kn|n)",
-        r"\bload\b\s*(?:of\s*)?[:=-]?\s*(\d+(?:\.\d+)?)\s*(kn|n)\b",
-        r"(\d+(?:\.\d+)?)\s*(kn|n)\s*(?:each\s*wheel|per\s*wheel|wheel\s*)?load\b",
+        r"(?:each\s*wheel|per\s*wheel|wheel\s*load|(?:wheel\s*)?load)\s*[:=-]?\s*[^\d]{0,20}(\d+(?:\.\d+)?)\s*" + _LOAD_UNIT_PAT,
+        r"\bload\b\s*(?:of\s*)?[:=-]?\s*(\d+(?:\.\d+)?)\s*" + _LOAD_UNIT_PAT + r"\b",
+        r"(\d+(?:\.\d+)?)\s*" + _LOAD_UNIT_PAT + r"\s*(?:each\s*wheel|per\s*wheel|wheel\s*)?load\b",
     ]
     for pattern in load_patterns:
         candidate = re.search(pattern, lowered)
@@ -1737,11 +1853,14 @@ def _extract_engineering_candidates(text: str) -> Tuple[Dict[str, Any], Dict[str
     if area_match:
         area_lx_mm = _length_to_mm(float(area_match.group(1)), area_match.group(2))
         area_ly_mm = _length_to_mm(float(area_match.group(3)), area_match.group(4))
+        # Store as private params so apply_implicit_inferences() can use actual contact dims.
+        out["_contact_lx_mm"] = area_lx_mm
+        out["_contact_ly_mm"] = area_ly_mm
 
     # If contact dimensions are provided but "load" isn't explicitly labeled,
     # treat the first kN/N magnitude as the load.
     if load_match is None and area_lx_mm is not None and area_ly_mm is not None:
-        load_match = re.search(r"\b(\d+(?:\.\d+)?)\s*(kn|n)\b(?!\s*/)", lowered)
+        load_match = re.search(r"\b(\d+(?:\.\d+)?)\s*(kn|n|t\b|ton|tons|tonne|tonnes|kg|kgf)\b(?!\s*/)", lowered)
 
     spacing_mm = _extract_spacing_mm(lowered)
     tandem_requested = bool(
@@ -1788,8 +1907,11 @@ def _extract_engineering_candidates(text: str) -> Tuple[Dict[str, Any], Dict[str
     if number_of_wheels > 1 and load_match and area_lx_mm is not None and area_ly_mm is not None:
         load_value = float(load_match.group(1))
         load_unit = (load_match.group(2) or "n").lower()
+        # If user says "axle load" / "total load", divide equally across all wheels.
+        axle_total = bool(re.search(r"\baxle\s+load\b|\btotal\s+(?:axle\s+)?load\b", lowered))
+        per_wheel_factor = (1.0 / number_of_wheels) if axle_total else 1.0
         q_val = round(
-            _compute_contact_pressure_q_mpa(load_value, load_unit, area_lx_mm, area_ly_mm),
+            _compute_contact_pressure_q_mpa(load_value * per_wheel_factor, load_unit, area_lx_mm, area_ly_mm),
             5,
         )
 
@@ -1852,25 +1974,34 @@ def _extract_engineering_candidates(text: str) -> Tuple[Dict[str, Any], Dict[str
         ]
         out["load_cases"] = load_cases
         out.update(load_cases[0])
-    elif inferred_location and area_lx_mm is not None and area_ly_mm is not None:
-        patch = infer_load_patch_from_contact_area(
-            inferred_location,
-            slab_a,
-            slab_b,
-            area_lx_mm,
-            area_ly_mm,
-            lowered,
+    elif area_lx_mm is not None and area_ly_mm is not None:
+        # Use _compute_patch_from_description so edge-distance descriptions ("1m from left...")
+        # and "center of slab" are handled in addition to named location classes.
+        patch = _compute_patch_from_description(
+            text, slab_a, slab_b, area_lx_mm, area_ly_mm, load_location=inferred_location
         )
-        out.update(patch)
+        if patch is not None:
+            out.update(patch)
 
     explicit_q = re.search(r"(?:pressure|\bq\b)\s*[:=-]?\s*(\d+(?:\.\d+)?)\s*(mpa|kpa|psi)?", lowered)
     has_load_and_area = load_match is not None and area_lx_mm is not None and area_ly_mm is not None
+
+    # Store raw load value so _detect_extraction_ambiguity() can see a load was given
+    # even when contact area is missing (and q can't yet be computed).
+    if load_match:
+        raw_load_kn_val = float(load_match.group(1))
+        raw_load_unit = (load_match.group(2) or "n").lower()
+        _LOAD_TO_KN_LOCAL = {
+            "kn": 1.0, "n": 0.001, "kgf": 0.00981, "kg": 0.00981,
+            "t": 9.81, "ton": 9.81, "tons": 9.81, "tonne": 9.81, "tonnes": 9.81,
+        }
+        out["_raw_load_kn"] = raw_load_kn_val * _LOAD_TO_KN_LOCAL.get(raw_load_unit, 1.0)
 
     # Priority (as required):
     # 1) Load + area => compute pressure
     # 2) Explicit pressure => use provided
     # 3) Otherwise => leave missing (defaults handled elsewhere)
-    if has_load_and_area:
+    if has_load_and_area and not load_cases:
         load_value = float(load_match.group(1))
         load_unit = (load_match.group(2) or "n").lower()
         out["q"] = round(
@@ -2074,6 +2205,20 @@ def create_extraction_prompt(user_input: str, context: str, current_asking: Opti
 ### CURRENTLY ASKING ABOUT
 {f"Parameter: {current_asking} ({PARAM_INFO[current_asking]['name']})" if current_asking else "General conversation - extract any parameters mentioned"}
 
+### EXAMPLES (few-shot)
+
+Input: "5m × 3.5m slab, 250mm thick, M30 concrete, K=60, 80kN load at edge over 350×300mm contact"
+→ extracted_multiple: {{"a":5000,"b":3500,"t":250,"Emod":27386,"Kx":60,"Ky":60,"Kz":60,"load_location":"edge","q":0.762}}
+→ friendly_response: "Great — I captured slab dimensions, M30 grade (E = 27,386 MPa from IS 456), K = 60, and computed contact pressure 0.762 MPa from the 80 kN load over 350 × 300 mm."
+
+Input: "use medium mesh, load at corner with 200×200 contact"
+→ extracted_multiple: {{"mesh_type":"medium","load_location":"corner"}}
+→ friendly_response: "Medium mesh and corner load noted. I'll compute the load patch starting at the corner based on your 200 × 200 mm contact area."
+
+Input: "tandem, two 60kN wheels, 300×300mm each, 1.2m spacing, interior"
+→ extracted_multiple: {{"load_location":"interior","q":0.667}}
+→ friendly_response: "Tandem setup noted — two 60 kN wheels at 1.2 m spacing, each on 300 × 300 mm contact (q = 0.667 MPa). I'll compute both wheel positions for the interior case."
+
 ### TASK
 1. Decide user intent:
     - provide one value,
@@ -2136,6 +2281,36 @@ def _invoke_llm_with_timeout(llm: ChatOllama, messages: List, timeout_seconds: f
         executor.shutdown(wait=False, cancel_futures=True)
 
 
+def _detect_extraction_ambiguity(
+    extracted: Dict[str, Any],
+    params: Dict[str, Any],
+) -> Optional[str]:
+    """Return a clarification question if extracted values are paired incompletely.
+
+    Catches the two most common gaps that require the user's help before the
+    assistant can compute a derived value (e.g., q from load + contact area).
+    Returns None when no ambiguity is detected.
+    """
+    has_contact = "_contact_lx_mm" in extracted
+    has_load_location = "load_location" in extracted or "load_location" in params
+    has_computed_q = "q" in extracted
+
+    if has_contact and not has_load_location:
+        return (
+            "I have the contact area dimensions — where on the slab does this load act? "
+            "(corner, edge, or interior)"
+        )
+
+    has_raw_load = "_raw_load_kn" in extracted
+    if has_raw_load and not has_contact and not has_computed_q:
+        return (
+            "Got the load value. Could you share the tyre contact dimensions "
+            "(e.g., 300 × 250 mm)? I'll compute the contact pressure from those."
+        )
+
+    return None
+
+
 def process_user_input_with_llm(
     user_input: str,
     llm: ChatOllama,
@@ -2187,9 +2362,9 @@ def process_user_input_with_llm(
     extracted_units.update(engineering_units)
 
     if extracted_multiple:
-        friendly = "Great details, thanks. I captured multiple values together."
-        if semantic_choices and len(extracted_multiple) == len(semantic_choices):
-            friendly = "Perfect, I captured that classification and will infer the detailed coordinates automatically."
+        # friendly_response is intentionally None here — generate_autonomous_assistant_message()
+        # will narrate the captured values naturally instead of a hardcoded static string.
+        friendly: Optional[str] = None
 
         understood_value: Optional[float] = None
         original_unit: Optional[str] = None
@@ -2261,16 +2436,23 @@ def process_user_input_with_llm(
                     understood_value = float(chosen[0])
                     original_unit = chosen[1]
 
+        # Check for partial/ambiguous input pairs (e.g., contact area but no load location).
+        ambiguity = _detect_extraction_ambiguity(extracted_multiple, params or {})
+        needs_clarification = ambiguity is not None
+        if ambiguity:
+            friendly = ambiguity
+
         return {
             "understood_value": understood_value,
             "use_default": False,
             "use_all_defaults": False,
-            "needs_clarification": False,
+            "needs_clarification": needs_clarification,
             "friendly_response": friendly,
             "original_unit": original_unit,
             "parameter_key": current_asking,
             "extracted_multiple": extracted_multiple,
             "extracted_units": extracted_units,
+            "conversation_only": False,
         }
 
     if check_use_all_defaults_intent(user_input):
@@ -2622,14 +2804,26 @@ def _next_question_context(current_asking: Optional[str]) -> str:
 
 def create_autonomous_response_system_prompt() -> str:
     return (
-        "You are an expert rigid pavement (concrete pavement) assistant. "
-        "You help the user set up analysis inputs, detect what is missing, and ask for the next needed detail.\n\n"
-        "Hard rules:\n"
-        "- Do NOT invent or guess numeric values. Use only confirmed values provided in the prompt context.\n"
-        "- Do NOT expose internal parameter keys, JSON, schema names, or code details.\n"
-        "- If something is missing, ask ONE focused follow-up question (user may reply with multiple values).\n"
-        "- If there are validation issues, ask the user to correct them before continuing.\n"
-        "- Keep the response concise, friendly, and practical. Use Markdown.\n"
+        "You are an expert rigid pavement (concrete pavement) assistant helping users configure "
+        "finite element analysis inputs for IS-code-based pavement design.\n\n"
+        "ENGINEERING KNOWLEDGE YOU MAY USE (to explain computations — never to invent values):\n"
+        "- IS 456 elastic modulus: E (MPa) = 5000 × √fck (fck in MPa). E.g., M30 → E = 27,386 MPa; M40 → E = 31,623 MPa.\n"
+        "- Poisson's ratio for concrete: typical 0.15–0.20 (IS 456 allows 0.15–0.25).\n"
+        "- Contact pressure: q (MPa) = load (kN) / contact_area (m²) / 1000. "
+        "E.g., 80 kN on 0.35 × 0.30 m → q = 80 / 0.105 / 1000 = 0.762 MPa.\n"
+        "- Corner load: patch starts at slab corner → x1=0, x2=contact_lx, y1=0, y2=contact_ly.\n"
+        "- Edge load: one edge of the patch is flush with the slab boundary; other coordinates from contact dims.\n"
+        "- Interior load: patch centred within the slab with clearance from all edges.\n"
+        "- Subgrade modulus K (dimensionless factor here): soft soil 20–30, medium 40–80, hard/stabilised 100–300.\n"
+        "- Mesh levels: coarse = 10×10 elements, medium = 15×15, fine = 30×30.\n\n"
+        "HARD RULES:\n"
+        "- Do NOT invent or guess numeric values. Use only confirmed values given in the prompt.\n"
+        "- Do NOT expose internal keys, JSON structure, schema names, or code details.\n"
+        "- If you computed a value from user data (E from grade, q from load+area, patch from contact+location), "
+        "explain the computation briefly in plain language.\n"
+        "- If something is missing or ambiguous, ask ONE focused follow-up question.\n"
+        "- If there are validation or feasibility issues, address them before moving on.\n"
+        "- Keep responses warm, concise, and practical. Use Markdown sparingly.\n"
     )
 
 
@@ -2690,12 +2884,20 @@ def create_autonomous_response_prompt(
 
     segments.append(
         "### TASK\n"
-        "Write the assistant reply.\n"
-        "- Confirm what changed (if anything).\n"
-        "- Mention inferences/conversions briefly (only if relevant).\n"
-        "- If there are issues, ask the user to fix them.\n"
-        "- Else if not complete, ask ONE focused question for the next needed input.\n"
-        "- Else, confirm completion and tell the user to review/export from the side panel.\n"
+        "Write the assistant reply following these priorities:\n"
+        "1. Confirm what was captured this turn (use human-readable names and values, not internal keys).\n"
+        "2. If a value was COMPUTED from user data (E from concrete grade, q from load+area, "
+        "patch coordinates from contact dims + location), explain that computation in one plain-language line.\n"
+        "3. If there are validation or feasibility issues, address the specific issue and ask the user to correct it.\n"
+        "4. If something is ambiguous (contact area given but no load location, or load given but no contact dims), "
+        "ask ONE focused clarification question.\n"
+        "5. If not complete and no issues, ask ONE focused question for the most important missing input.\n"
+        "6. If complete, confirm all inputs are ready and tell the user to review or export from the side panel.\n\n"
+        "PROACTIVE BEHAVIOURS (apply where relevant, don't overdo):\n"
+        "- If user provided load (kN) but no contact dims → ask for tyre contact dimensions.\n"
+        "- If user gave concrete grade → confirm the computed E value from IS 456.\n"
+        "- If user said 'corner' or 'edge' load with a contact area → confirm the computed patch coordinates.\n"
+        "- After concrete grade is given, if Poisson's ratio is still missing → suggest IS 456 default of 0.18.\n\n"
         "Do not output JSON.\n"
     )
 

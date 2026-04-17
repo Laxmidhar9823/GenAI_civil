@@ -64,10 +64,37 @@ export default function ParamsPanel(props: {
   // When true, export buttons are enabled.
   finalConfirmed: boolean
   onConfirmFinal: () => void
+  analysisBusy: boolean
+  analysisError: string | null
+  analysisResult: {
+    success: boolean
+    message: string
+    input_json_path?: string | null
+    output_dir?: string | null
+    vtk_file?: string | null
+    results_file?: string | null
+    summary_file?: string | null
+    detailed_report?: Record<string, unknown> | null
+    solver_stdout?: string | null
+  } | null
+  onGenerateAnalysis: () => Promise<void> | void
   // Edits are applied by the parent (e.g., via backend chat/state update).
   onEditParam: (key: string, value: string) => Promise<void> | void
 }) {
-  const { progress, paramInfo, collected, finalParams, busy, finalConfirmed, onConfirmFinal, onEditParam } = props
+  const {
+    progress,
+    paramInfo,
+    collected,
+    finalParams,
+    busy,
+    finalConfirmed,
+    onConfirmFinal,
+    analysisBusy,
+    analysisError,
+    analysisResult,
+    onGenerateAnalysis,
+    onEditParam,
+  } = props
 
   // Inline edit state (Collected Parameters panel).
   const [rowEditingKey, setRowEditingKey] = useState<string | null>(null)
@@ -421,6 +448,39 @@ export default function ParamsPanel(props: {
                   <button
                     className="btn primary"
                     style={{ width: '100%' }}
+                    onClick={() => {
+                      void onGenerateAnalysis()
+                    }}
+                    disabled={busy || analysisBusy}
+                  >
+                    {analysisBusy ? 'Generating Analysis...' : 'Generate Analysis'}
+                  </button>
+
+                  {analysisError && (
+                    <div className="status-detail warning" style={{ marginTop: '12px' }}>
+                      {analysisError}
+                    </div>
+                  )}
+
+                  {analysisResult && (
+                    <div
+                      className="status-detail"
+                      style={{
+                        marginTop: '12px',
+                        borderColor: analysisResult.success ? 'var(--success)' : 'var(--danger)',
+                      }}
+                    >
+                      <strong>{analysisResult.success ? 'Analysis completed.' : 'Analysis failed.'}</strong>
+                      <div>{analysisResult.message}</div>
+                      {analysisResult.vtk_file && <div>VTK: {analysisResult.vtk_file}</div>}
+                      {analysisResult.summary_file && <div>Summary: {analysisResult.summary_file}</div>}
+                      {analysisResult.results_file && <div>Results: {analysisResult.results_file}</div>}
+                    </div>
+                  )}
+
+                  <button
+                    className="btn primary"
+                    style={{ width: '100%', marginTop: '10px' }}
                     onClick={() => {
                       const sanitized = sanitizeExportPayload(finalParams)
                       const prettyJson = JSON.stringify(sanitized, null, 2)

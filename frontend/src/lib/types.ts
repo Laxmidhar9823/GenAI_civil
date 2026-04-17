@@ -9,11 +9,16 @@ export type ConversationMode = 'welcome' | 'guided' | 'free' | 'complete'
 
 export type ConversationState = {
   messages: Message[]
+  memory?: string
   params: Record<string, unknown>
   user_provided_keys: string[]
   current_asking: string | null
   mode: ConversationMode
   welcomed: boolean
+  analysis_generated?: boolean
+  analysis_vtk_file?: string | null
+  analysis_summary_file?: string | null
+  analysis_plot_files?: string[]
 }
 
 export type ParamInfoEntry = {
@@ -70,6 +75,19 @@ export type ChatResponse = {
   assistant_message?: string
   state: ConversationState
   final_params?: Record<string, unknown>
+}
+
+export type GenerateAnalysisResponse = {
+  success: boolean
+  message: string
+  input_json_path?: string | null
+  output_dir?: string | null
+  vtk_file?: string | null
+  results_file?: string | null
+  summary_file?: string | null
+  detailed_report?: Record<string, unknown> | null
+  solver_stdout?: string | null
+  plot_files?: string[]
 }
 
 export type ErrorDetail = {

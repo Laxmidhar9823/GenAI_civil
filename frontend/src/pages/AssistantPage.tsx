@@ -2,8 +2,8 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import ChatPanel from '../components/ChatPanel'
 import OllamaSettings from '../components/OllamaSettings'
 import ParamsPanel from '../components/ParamsPanel'
-import { apiChat, apiGetSchema, apiHealth, apiOllamaStatus, apiReset } from '../lib/api'
-import type { ChatMessage, ConversationState, OllamaCheckState, SchemaResponse } from '../lib/types'
+import { API_BASE_URL, apiChat, apiGenerateAnalysis, apiGetSchema, apiHealth, apiOllamaStatus, apiReset } from '../lib/api'
+import type { ChatMessage, ConversationState, GenerateAnalysisResponse, OllamaCheckState, SchemaResponse } from '../lib/types'
 import { computeProgress, extractCollectedParams, extractFinalParams, extractMessagesFromState, extractParamInfo } from '../lib/parsers'
 
 function newId() {
@@ -59,6 +59,9 @@ export default function AssistantPage() {
   const [state, setState] = useState<ConversationState | null>(null)
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [finalParamsFromResponse, setFinalParamsFromResponse] = useState<Record<string, unknown> | null>(null)
+  const [analysisBusy, setAnalysisBusy] = useState(false)
+  const [analysisError, setAnalysisError] = useState<string | null>(null)
+  const [analysisResult, setAnalysisResult] = useState<GenerateAnalysisResponse | null>(null)
   // When a configuration is complete, require the user to review/confirm before exporting.
   // This adds an edit/update step without changing backend business logic.
   const [finalConfirmed, setFinalConfirmed] = useState(false)
@@ -73,11 +76,16 @@ export default function AssistantPage() {
 
   const emptyConversationState: ConversationState = {
     messages: [],
+    memory: '',
     params: {},
     user_provided_keys: [],
     current_asking: null,
     mode: 'welcome',
     welcomed: false,
+    analysis_generated: false,
+    analysis_vtk_file: null,
+    analysis_summary_file: null,
+    analysis_plot_files: [],
   }
 
   // Effects to persist settings
@@ -131,6 +139,8 @@ export default function AssistantPage() {
     setError(null)
     setBusy(true)
     setFinalParamsFromResponse(null)
+    setAnalysisError(null)
+    setAnalysisResult(null)
     setFinalConfirmed(false)
 
     try {
@@ -220,6 +230,8 @@ export default function AssistantPage() {
     setBusy(true)
     setError(null)
     setFinalParamsFromResponse(null)
+    setAnalysisError(null)
+    setAnalysisResult(null)
     // Any new message (including edits) invalidates prior confirmation.
     setFinalConfirmed(false)
 
@@ -272,6 +284,8 @@ export default function AssistantPage() {
 
       // Any edit invalidates prior confirmation.
       setFinalConfirmed(false)
+      setAnalysisError(null)
+      setAnalysisResult(null)
 
       // Build a consistent snapshot of params: (current state.params + this edit).
       const baseParams = (state?.params ?? {}) as Record<string, unknown>
@@ -307,6 +321,7 @@ export default function AssistantPage() {
           prev ??
           ({
             messages: [],
+            memory: '',
             params: {},
             user_provided_keys: [],
             current_asking: null,
@@ -343,6 +358,70 @@ export default function AssistantPage() {
     },
     [state],
   )
+
+  const generateAnalysis = useCallback(async () => {
+    if (!finalParams || busy || analysisBusy) return
+
+    setAnalysisBusy(true)
+    setAnalysisError(null)
+    setAnalysisResult(null)
+
+    try {
+      const resp = await apiGenerateAnalysis({ final_params: finalParams })
+      setAnalysisResult(resp)
+      if (!resp.success) {
+        setAnalysisError(resp.message || 'Analysis failed.')
+        return
+      }
+
+      const resolvedPlotUrls = (resp.plot_files ?? []).map((plotPath) =>
+        plotPath.startsWith('http') ? plotPath : `${API_BASE_URL}${plotPath.startsWith('/') ? plotPath : `/${plotPath}`}`,
+      )
+
+      const chatLines: string[] = []
+      chatLines.push('### Analysis Complete')
+      chatLines.push(resp.message)
+      if (resp.vtk_file) chatLines.push(`- VTK file: ${resp.vtk_file}`)
+      if (resp.summary_file) chatLines.push(`- Summary file: ${resp.summary_file}`)
+      if (resp.results_file) chatLines.push(`- Results file: ${resp.results_file}`)
+
+      if (resolvedPlotUrls.length > 0) {
+        chatLines.push('')
+        chatLines.push('### Generated Plots')
+        for (let i = 0; i < resolvedPlotUrls.length; i++) {
+          const label = `Plot ${i + 1}`
+          chatLines.push(`![${label}](${resolvedPlotUrls[i]})`)
+        }
+      }
+
+      chatLines.push('')
+      chatLines.push('You can now ask follow-up questions about these results, for example: "max deflection", "mean sxx_top", or "show vtk fields".')
+      const assistantMessage = chatLines.join('\n')
+      const assistantStateMessage: ConversationState['messages'][number] = {
+        role: 'assistant',
+        content: assistantMessage,
+      }
+
+      setMessages((prev) => [...prev, { id: newId(), role: 'assistant', content: assistantMessage }])
+      setState((prev) => {
+        const base = prev ?? emptyConversationState
+        const nextMessages = [...base.messages, assistantStateMessage]
+        return {
+          ...base,
+          mode: base.mode === 'welcome' ? 'free' : base.mode,
+          analysis_generated: true,
+          analysis_vtk_file: resp.vtk_file ?? base.analysis_vtk_file ?? null,
+          analysis_summary_file: resp.summary_file ?? base.analysis_summary_file ?? null,
+          analysis_plot_files: resolvedPlotUrls,
+          messages: nextMessages,
+        }
+      })
+    } catch (e) {
+      setAnalysisError((e as Error).message)
+    } finally {
+      setAnalysisBusy(false)
+    }
+  }, [analysisBusy, busy, finalParams])
 
   return (
     <div className="chat-layout">
@@ -384,6 +463,10 @@ export default function AssistantPage() {
           busy={busy}
           finalConfirmed={finalConfirmed}
           onConfirmFinal={() => setFinalConfirmed(true)}
+         analysisBusy={analysisBusy}
+         analysisError={analysisError}
+         analysisResult={analysisResult}
+         onGenerateAnalysis={generateAnalysis}
           onEditParam={(key, value) => {
             applyParamEdit(key, value)
           }}

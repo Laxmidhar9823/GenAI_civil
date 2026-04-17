@@ -632,6 +632,16 @@ h3 {
   color: var(--text-primary);
 }
 
+.markdown-content img {
+  display: block;
+  width: 100%;
+  max-width: 100%;
+  border-radius: 12px;
+  border: 1px solid var(--border-light);
+  box-shadow: var(--shadow-sm);
+  margin: 12px 0;
+}
+
 /* Helper Panel (Right Side) */
 .params-panel {
   background-color: var(--bg-sidebar);

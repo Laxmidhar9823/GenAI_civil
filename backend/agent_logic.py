@@ -1329,21 +1329,48 @@ def get_friendly_param_question(key: str, params: Dict[str, Any]) -> str:
     return question
 
 
-def build_conversation_context(messages: List[Dict], params: Dict[str, Any]) -> str:
+def build_conversation_context(messages: List[Dict], params: Dict[str, Any], memory: Optional[str] = None) -> str:
     context_parts = []
+    if memory:
+        mem = str(memory).strip()
+        if mem:
+            # Keep memory bounded in the prompt context to avoid runaway token usage.
+            if len(mem) > 6000:
+                mem = "..." + mem[-6000:]
+            context_parts.append("Earlier conversation memory (compacted):")
+            context_parts.append(mem)
     if params:
         context_parts.append("Current parameters collected:")
         for key, value in params.items():
             info = PARAM_INFO.get(key, {})
             context_parts.append(f"- {info.get('name', key)}: {format_value_with_unit(value, key)}")
 
-    recent_messages = messages[-6:] if len(messages) > 6 else messages
-    if recent_messages:
-        context_parts.append("\nRecent conversation:")
-        for msg in recent_messages:
-            role = "User" if msg["role"] == "user" else "Assistant"
-            content = msg["content"][:200] + "..." if len(msg["content"]) > 200 else msg["content"]
-            context_parts.append(f"{role}: {content}")
+    # Include as much recent conversation as fits into a safe budget.
+    max_recent_chars = 6000
+    kept: List[Dict] = []
+    used_chars = 0
+    for msg in reversed(messages):
+        content_raw = str(msg.get("content") or "")
+        content = content_raw.strip()
+        if len(content) > 400:
+            content = content[:400] + "..."
+
+        role_raw = str(msg.get("role") or "")
+        role = "User" if role_raw == "user" else ("Assistant" if role_raw == "assistant" else "System")
+        line = f"{role}: {content}"
+
+        # +1 for newline join.
+        add_len = len(line) + 1
+        if kept and used_chars + add_len > max_recent_chars:
+            break
+
+        kept.append({"line": line})
+        used_chars += add_len
+
+    kept_lines = [item["line"] for item in reversed(kept)]
+    if kept_lines:
+        context_parts.append("\nConversation (most recent first-fit):")
+        context_parts.extend(kept_lines)
     return "\n".join(context_parts)
 
 
@@ -2608,6 +2635,7 @@ def create_autonomous_response_system_prompt() -> str:
 
 def create_autonomous_response_prompt(
     *,
+    memory: Optional[str] = None,
     user_input: str,
     mode: str,
     params: Dict[str, Any],
@@ -2627,7 +2655,16 @@ def create_autonomous_response_prompt(
         # Provide a safe reference block that the model may paraphrase.
         explanation_seed = _parameter_explanation(explain_key)
 
-    segments: List[str] = [
+    segments: List[str] = []
+
+    if memory:
+        mem = str(memory).strip()
+        if mem:
+            if len(mem) > 6000:
+                mem = "..." + mem[-6000:]
+            segments.append(f"### EARLIER CONVERSATION MEMORY (compacted)\n{mem}\n\n")
+
+    segments.extend([
         f"### USER MESSAGE\n{user_input}\n\n",
         f"### MODE\n{mode}\n\n",
         f"### CONVERSATION-ONLY\n{conversation_only}\n\n",
@@ -2644,7 +2681,7 @@ def create_autonomous_response_prompt(
         + ("\n".join(f"- {n}" for n in missing_names) if missing_names else "- (none)")
         + "\n\n",
         f"### NEXT QUESTION CONTEXT\n{_next_question_context(current_asking)}\n\n",
-    ]
+    ])
 
     if explanation_seed:
         segments.append(
@@ -2668,6 +2705,7 @@ def create_autonomous_response_prompt(
 def generate_autonomous_assistant_message(
     *,
     llm: Optional[ChatOllama],
+    memory: Optional[str] = None,
     user_input: str,
     mode: str,
     params: Dict[str, Any],
@@ -2692,6 +2730,7 @@ def generate_autonomous_assistant_message(
     try:
         system = SystemMessage(content=create_autonomous_response_system_prompt())
         prompt = create_autonomous_response_prompt(
+            memory=memory,
             user_input=user_input,
             mode=mode,
             params=params,

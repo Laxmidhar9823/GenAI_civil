@@ -1,11 +1,16 @@
+import json
 import os
+from pathlib import Path
+import subprocess
+import sys
 import uuid
-from typing import Dict
+from typing import Any, Dict, List
 
 from fastapi import FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from backend.agent_logic import (
     DEFAULT_VALUES,
@@ -39,12 +44,15 @@ from backend.ollama import (
     resolve_model_match,
     suggest_available_models,
 )
+from backend.vtk_lookup_agent import handle_vtk_lookup_command
 from backend.schemas import (
     ChatRequest,
     ChatResponse,
     ConversationState,
     ErrorDetail,
     ErrorResponse,
+    GenerateAnalysisRequest,
+    GenerateAnalysisResponse,
     Message,
     OllamaStatusResponse,
     ResetResponse,
@@ -68,6 +76,12 @@ DEFAULT_CORS_ORIGINS = [
 ]
 APP_ENV = os.getenv("BACKEND_ENV", os.getenv("ENV", "production")).lower()
 IS_DEV = APP_ENV in {"dev", "development", "local"}
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SOLVER_SCRIPT = REPO_ROOT / "DOF5_07.09.2025.py"
+FEM_KERNEL_SCRIPT = REPO_ROOT / "fem_local_Plate20_DOF5_07_09_2025.py"
+OUTPUT_DIR = REPO_ROOT / "output_python_square"
+GENERATED_INPUT_FILE = OUTPUT_DIR / "pavement-config.generated.json"
+VTK_DETAIL_SCRIPT = REPO_ROOT / "backend" / "scripts" / "vtk_detailed_report.py"
 
 
 def _allowed_origins() -> list[str]:
@@ -82,7 +96,15 @@ def _request_id(request: Request) -> str:
     return getattr(request.state, "request_id", "unknown")
 
 
+def _tail_text(text: str, max_chars: int = 2000) -> str:
+    body = (text or "").strip()
+    if len(body) <= max_chars:
+        return body
+    return body[-max_chars:]
+
+
 app = FastAPI(title=APP_NAME, version=APP_VERSION)
+app.mount("/artifacts", StaticFiles(directory=str(OUTPUT_DIR), check_dir=False), name="artifacts")
 
 app.add_middleware(
     CORSMiddleware,
@@ -138,9 +160,39 @@ async def global_exception_handler(request: Request, exc: Exception):
     return JSONResponse(status_code=500, content=err.model_dump())
 
 
-def _trim_messages(state: ConversationState, max_messages: int = 50) -> None:
-    if len(state.messages) > max_messages:
-        state.messages = state.messages[-max_messages:]
+def _trim_messages(state: ConversationState, max_messages: int = 50, memory_max_chars: int = 20000) -> None:
+    if len(state.messages) <= max_messages:
+        return
+
+    overflow = state.messages[:-max_messages]
+    keep = state.messages[-max_messages:]
+
+    # Compact the overflow into a rolling memory string.
+    lines: list[str] = []
+    for msg in overflow:
+        role = msg.role
+        if role == "user":
+            label = "User"
+        elif role == "assistant":
+            label = "Assistant"
+        else:
+            label = "System"
+
+        content = (msg.content or "").strip().replace("\r\n", "\n")
+        content = " ".join(content.split())
+        if len(content) > 400:
+            content = content[:400] + "..."
+        if content:
+            lines.append(f"{label}: {content}")
+
+    snippet = "\n".join(lines).strip()
+    if snippet:
+        prior = (state.memory or "").strip()
+        state.memory = (prior + "\n" + snippet).strip() if prior else snippet
+        if len(state.memory) > memory_max_chars:
+            state.memory = state.memory[-memory_max_chars:]
+
+    state.messages = keep
 
 
 @app.get("/health")
@@ -226,8 +278,137 @@ def reset() -> ResetResponse:
         current_asking=None,
         mode="welcome",
         welcomed=True,
+        analysis_generated=False,
+        analysis_vtk_file=None,
+        analysis_summary_file=None,
+        analysis_plot_files=[],
     )
     return ResetResponse(assistant_message=welcome, state=state)
+
+
+@app.post("/analysis/generate", response_model=GenerateAnalysisResponse)
+def generate_analysis(req: GenerateAnalysisRequest) -> GenerateAnalysisResponse:
+    if not isinstance(req.final_params, dict) or not req.final_params:
+        return GenerateAnalysisResponse(
+            success=False,
+            message="Missing final_params payload. Please complete and confirm configuration first.",
+        )
+
+    required_sections = {"nodes", "slab", "subgrade", "loads"}
+    missing_sections = sorted(required_sections.difference(req.final_params.keys()))
+    if missing_sections:
+        return GenerateAnalysisResponse(
+            success=False,
+            message=(
+                "final_params is not in unified solver format. "
+                f"Missing section(s): {', '.join(missing_sections)}."
+            ),
+        )
+
+    try:
+        if not SOLVER_SCRIPT.exists():
+            return GenerateAnalysisResponse(
+                success=False,
+                message=f"Solver script is missing: {SOLVER_SCRIPT}",
+            )
+
+        if not FEM_KERNEL_SCRIPT.exists():
+            return GenerateAnalysisResponse(
+                success=False,
+                message=(
+                    "Cannot run analysis: required FEM kernel file is missing "
+                    f"({FEM_KERNEL_SCRIPT.name})."
+                ),
+            )
+
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        GENERATED_INPUT_FILE.write_text(
+            json.dumps(req.final_params, indent=2),
+            encoding="utf-8",
+        )
+
+        completed = subprocess.run(
+            [sys.executable, str(SOLVER_SCRIPT), str(GENERATED_INPUT_FILE)],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+
+        combined_output = "\n".join(
+            chunk for chunk in [completed.stdout.strip(), completed.stderr.strip()] if chunk
+        ).strip()
+
+        if completed.returncode != 0:
+            return GenerateAnalysisResponse(
+                success=False,
+                message="Analysis run failed while executing the solver script.",
+                input_json_path=str(GENERATED_INPUT_FILE),
+                output_dir=str(OUTPUT_DIR),
+                solver_stdout=_tail_text(combined_output),
+            )
+
+        vtk_file = OUTPUT_DIR / "results.vtk"
+        results_file = OUTPUT_DIR / "results.txt"
+        summary_file = OUTPUT_DIR / "summary_results.txt"
+
+        if not vtk_file.exists():
+            return GenerateAnalysisResponse(
+                success=False,
+                message="Solver completed but results.vtk was not generated.",
+                input_json_path=str(GENERATED_INPUT_FILE),
+                output_dir=str(OUTPUT_DIR),
+                results_file=str(results_file) if results_file.exists() else None,
+                summary_file=str(summary_file) if summary_file.exists() else None,
+                solver_stdout=_tail_text(combined_output),
+            )
+
+        detailed_report: Dict[str, Any] | None = None
+        if VTK_DETAIL_SCRIPT.exists():
+            detail_cmd = subprocess.run(
+                [sys.executable, str(VTK_DETAIL_SCRIPT), "--file", str(vtk_file)],
+                cwd=str(REPO_ROOT),
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            if detail_cmd.returncode == 0 and detail_cmd.stdout.strip():
+                try:
+                    detailed_report = json.loads(detail_cmd.stdout)
+                except json.JSONDecodeError:
+                    detailed_report = None
+
+        plot_files = [f"/artifacts/{p.name}" for p in sorted(OUTPUT_DIR.glob("*.png"))]
+
+        return GenerateAnalysisResponse(
+            success=True,
+            message=(
+                "Analysis generated successfully. VTK and summary artifacts were updated in "
+                "output_python_square/."
+            ),
+            input_json_path=str(GENERATED_INPUT_FILE),
+            output_dir=str(OUTPUT_DIR),
+            vtk_file=str(vtk_file),
+            results_file=str(results_file) if results_file.exists() else None,
+            summary_file=str(summary_file) if summary_file.exists() else None,
+            detailed_report=detailed_report,
+            solver_stdout=_tail_text(combined_output),
+            plot_files=plot_files,
+        )
+    except subprocess.TimeoutExpired:
+        return GenerateAnalysisResponse(
+            success=False,
+            message="Analysis timed out after 10 minutes.",
+            input_json_path=str(GENERATED_INPUT_FILE),
+            output_dir=str(OUTPUT_DIR),
+        )
+    except Exception as exc:
+        return GenerateAnalysisResponse(
+            success=False,
+            message=f"Analysis failed: {exc}",
+            input_json_path=str(GENERATED_INPUT_FILE),
+            output_dir=str(OUTPUT_DIR),
+        )
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -236,9 +417,34 @@ def chat(req: ChatRequest) -> ChatResponse:
 
     state.messages.append(Message(role="user", content=req.user_input))
 
+    analysis_vtk = (state.analysis_vtk_file or "").strip() if state.analysis_generated else ""
+    lookup_response = handle_vtk_lookup_command(
+        req.user_input,
+        default_vtk_file=analysis_vtk or None,
+        allow_implicit=bool(analysis_vtk),
+    )
+    if lookup_response is not None:
+        if state.mode == "welcome":
+            state.mode = "free"
+
+        response = with_progress_tail(
+            lookup_response,
+            state.params,
+            state.current_asking,
+            include_progress=(state.mode != "complete"),
+        )
+        state.messages.append(Message(role="assistant", content=response))
+        _trim_messages(state)
+        final_params = build_final_configuration(state.params) if state.mode == "complete" else None
+        return ChatResponse(assistant_message=response, state=state, final_params=final_params)
+
     # Build extraction context from recent conversation + collected params.
     # This enables multi-turn, stateful assistance (values, corrections, and missing-info followups).
-    context = build_conversation_context([m.model_dump() for m in state.messages], state.params)
+    context = build_conversation_context(
+        [m.model_dump() for m in state.messages],
+        state.params,
+        state.memory,
+    )
     lower_input = req.user_input.lower().strip()
 
     response = ""
@@ -292,6 +498,7 @@ def chat(req: ChatRequest) -> ChatResponse:
         # Narrate guided start via the LLM (fallback: deterministic text above).
         response = generate_autonomous_assistant_message(
             llm=llm,
+            memory=state.memory,
             user_input=req.user_input,
             mode=state.mode,
             params=state.params,
@@ -418,6 +625,7 @@ def chat(req: ChatRequest) -> ChatResponse:
             # Let the LLM narrate the completed state (fallback: deterministic completion message above).
             response = generate_autonomous_assistant_message(
                 llm=llm,
+                memory=state.memory,
                 user_input=req.user_input,
                 mode=state.mode,
                 params=state.params,
@@ -602,6 +810,7 @@ def chat(req: ChatRequest) -> ChatResponse:
             # If the LLM is unavailable, we keep the deterministic response as fallback.
             response = generate_autonomous_assistant_message(
                 llm=llm,
+                memory=state.memory,
                 user_input=req.user_input,
                 mode=state.mode,
                 params=state.params,

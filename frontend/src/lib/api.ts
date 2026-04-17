@@ -8,6 +8,7 @@ import type {
   ChatResponse,
   ConversationState,
   ErrorResponse,
+  GenerateAnalysisResponse,
   OllamaStatusResponse,
   ResetResponse,
   SchemaResponse,
@@ -151,4 +152,10 @@ export async function apiOllamaStatus(params: { ollama_url: string; model: strin
   return fetchJson<OllamaStatusResponse>(`/ollama/status?${q}`, {
     headers: apiKey ? { 'x-ollama-api-key': apiKey } : undefined,
   })
+}
+
+export async function apiGenerateAnalysis(payload: {
+  final_params: Record<string, unknown>
+}): Promise<GenerateAnalysisResponse> {
+  return fetchJson('/analysis/generate', { method: 'POST', body: payload })
 }

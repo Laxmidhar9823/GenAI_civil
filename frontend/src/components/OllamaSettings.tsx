@@ -15,7 +15,7 @@ export default function OllamaSettings(props: {
   const { ollamaUrl, setOllamaUrl, model, setModel, apiKey, setApiKey, status, onCheckNow } = props
 
   return (
-    <div className="card">
+    <div className="card" data-tour="ollama-settings">
       <div className="card-header">
         <h3>Backend Settings</h3>
         <StatusPill status={status} />

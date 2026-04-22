@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ChatPanel from '../components/ChatPanel'
 import OllamaSettings from '../components/OllamaSettings'
+import OnboardingTour, { shouldShowTour } from '../components/OnboardingTour'
 import ParamsPanel from '../components/ParamsPanel'
 import { API_BASE_URL, apiChat, apiGenerateAnalysis, apiGetSchema, apiHealth, apiOllamaStatus, apiReset } from '../lib/api'
 import type { ChatMessage, ConversationState, GenerateAnalysisResponse, OllamaCheckState, SchemaResponse } from '../lib/types'
@@ -74,6 +75,15 @@ export default function AssistantPage() {
   const [apiKey, setApiKey] = useState(() => localStorage.getItem('ollamaApiKey') || '')
   const [ollamaStatus, setOllamaStatus] = useState<OllamaCheckState>({ kind: 'unknown' })
 
+  // Onboarding tour
+  const [showTour, setShowTour] = useState(false)
+
+  // Param change highlighting
+  const [highlightedParams, setHighlightedParams] = useState<Set<string>>(new Set())
+  const highlightTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
+  const isFirstCollected = useRef(true)
+  const prevCollectedRef = useRef<Record<string, unknown>>({})
+
   const emptyConversationState: ConversationState = {
     messages: [],
     memory: '',
@@ -97,6 +107,53 @@ export default function AssistantPage() {
   const collected = useMemo(() => extractCollectedParams(state), [state])
   const finalParams = useMemo(() => extractFinalParams(state, finalParamsFromResponse), [state, finalParamsFromResponse])
   const progress = useMemo(() => computeProgress({ paramInfo, collected }), [paramInfo, collected])
+
+  // Show onboarding tour once the page is fully settled
+  useEffect(() => {
+    if (!busy && state && backendHealthy && shouldShowTour()) {
+      const t = setTimeout(() => setShowTour(true), 600)
+      return () => clearTimeout(t)
+    }
+  }, [busy, state, backendHealthy])
+
+  // Track param changes and highlight affected rows
+  useEffect(() => {
+    if (isFirstCollected.current) {
+      isFirstCollected.current = false
+      prevCollectedRef.current = collected ? { ...collected } : {}
+      return
+    }
+
+    const prev = prevCollectedRef.current
+    const curr = collected ?? {}
+
+    const changed = new Set<string>()
+    for (const key of Object.keys(curr)) {
+      if (JSON.stringify(curr[key]) !== JSON.stringify(prev[key])) {
+        changed.add(key)
+      }
+    }
+
+    prevCollectedRef.current = { ...curr }
+
+    if (changed.size === 0) return
+
+    setHighlightedParams(p => new Set([...p, ...changed]))
+
+    changed.forEach(key => {
+      const existing = highlightTimers.current.get(key)
+      if (existing) clearTimeout(existing)
+      const t = setTimeout(() => {
+        setHighlightedParams(p => {
+          const next = new Set(p)
+          next.delete(key)
+          return next
+        })
+        highlightTimers.current.delete(key)
+      }, 2500)
+      highlightTimers.current.set(key, t)
+    })
+  }, [collected])
 
   const applyStateToMessages = useCallback((nextState: ConversationState) => {
     const fromState = extractMessagesFromState(nextState)
@@ -459,7 +516,12 @@ export default function AssistantPage() {
           />
 
           <div style={{ marginTop: 'auto' }}>
-            <button className="btn" style={{ width: '100%' }} onClick={resetConversation}>
+            <button
+              className="btn"
+              style={{ width: '100%' }}
+              onClick={resetConversation}
+              data-tour="reset-session"
+            >
                Reset Session
             </button>
             {error && (
@@ -474,7 +536,7 @@ export default function AssistantPage() {
        <ChatPanel messages={messages} busy={busy} onSend={handleSend} />
 
        {/* Right Sidebar: Params & Progress */}
-       <ParamsPanel 
+       <ParamsPanel
           progress={progress}
           paramInfo={paramInfo}
           collected={collected}
@@ -486,10 +548,12 @@ export default function AssistantPage() {
          analysisError={analysisError}
          analysisResult={analysisResult}
          onGenerateAnalysis={generateAnalysis}
+          highlightedParams={highlightedParams}
           onEditParam={(key, value) => {
             applyParamEdit(key, value)
           }}
        />
+       {showTour && <OnboardingTour onDone={() => setShowTour(false)} />}
     </div>
   )
 }

@@ -80,6 +80,8 @@ export default function ParamsPanel(props: {
   onGenerateAnalysis: () => Promise<void> | void
   // Edits are applied by the parent (e.g., via backend chat/state update).
   onEditParam: (key: string, value: string) => Promise<void> | void
+  // Keys currently highlighted due to recent changes
+  highlightedParams?: Set<string>
 }) {
   const {
     progress,
@@ -94,6 +96,7 @@ export default function ParamsPanel(props: {
     analysisResult,
     onGenerateAnalysis,
     onEditParam,
+    highlightedParams,
   } = props
 
   // Inline edit state (Collected Parameters panel).
@@ -184,7 +187,7 @@ export default function ParamsPanel(props: {
   const percent = progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0
 
   return (
-    <div className="params-panel">
+    <div className="params-panel" data-tour="params-panel">
       <div className="panel-header">
         <h3>Configuration Status</h3>
         <span style={{ fontSize: '12px', color: 'var(--text-secondary)' }}>
@@ -220,7 +223,10 @@ export default function ParamsPanel(props: {
                 </thead>
                 <tbody>
                   {rows.map((r) => (
-                    <tr key={r.key}>
+                    <tr
+                      key={r.key}
+                      className={highlightedParams?.has(r.key) ? 'param-row-highlight' : undefined}
+                    >
                       <td>
                         <div className="param-label-wrap">
                           <span className="param-symbol" title={`Symbol: ${r.symbol}`}>{r.symbol}</span>

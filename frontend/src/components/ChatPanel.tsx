@@ -18,7 +18,7 @@ export default function ChatPanel(props: {
   }, [messages.length])
 
   return (
-    <div className="chat-main">
+    <div className="chat-main" data-tour="chat-main">
       <div className="chat-messages" ref={scrollerRef} role="log" aria-live="polite" aria-relevant="additions">
         {messages.length === 0 ? (
           <div className="chat-empty-state">

@@ -20,7 +20,6 @@ from backend.agent_logic import (
     PARAM_INFO,
     PARAM_ORDER,
     build_final_configuration,
-    check_use_all_defaults_intent,
     process_user_input_with_llm,
     convert_to_standard_unit,
     format_value_with_unit,
@@ -597,7 +596,7 @@ def chat(req: ChatRequest) -> ChatResponse:
         single_value = result.get("understood_value")
         single_key = result.get("parameter_key") or state.current_asking
 
-        use_all_defaults = bool(result.get("use_all_defaults") or check_use_all_defaults_intent(req.user_input))
+        use_all_defaults = bool(result.get("use_all_defaults"))
         if use_all_defaults:
             prefill_updates: Dict[str, object] = {}
             prefill_explicit_keys = set()

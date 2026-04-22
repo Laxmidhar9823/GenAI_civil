@@ -309,6 +309,13 @@ def _normalize_text(text: str) -> str:
     return " ".join((text or "").strip().lower().split())
 
 
+def _contains_default_keyword(text: str) -> bool:
+    normalized = _normalize_text(text)
+    if not normalized:
+        return False
+    return bool(re.search(r"\bdefaults?\b", normalized))
+
+
 def _looks_like_greeting(text: str) -> bool:
     normalized = _normalize_text(text)
     if not normalized:
@@ -596,29 +603,8 @@ PARAM_ORDER = ["a", "b", "mesh_type", "t", "Emod", "nu", "Kx", "Ky", "Kz", "load
 LLM_INVOKE_TIMEOUT_SECONDS = float(os.getenv("LLM_INVOKE_TIMEOUT_SECONDS", "45.0"))
 LLM_NARRATION_TIMEOUT_SECONDS = float(os.getenv("LLM_NARRATION_TIMEOUT_SECONDS", "25.0"))
 
-USE_ALL_DEFAULTS_PATTERNS = [
-    "use defaults",
-    "use all defaults",
-    "take all the default values for all the params",
-    "take all default values for all params",
-    "take all defaults",
-    "take defaults for all parameters",
-    "defaults for remaining",
-    "defaults for the rest",
-    "use defaults for remaining",
-    "use defaults for the rest",
-    "fill remaining with defaults",
-    "fill rest with defaults",
-    "skip the rest",
-    "skip remaining",
-    "i don't know the rest",
-    "thats all i have",
-]
-
 SINGLE_DEFAULT_PATTERNS = {
-    "default",
     "skip",
-    "use default",
     "ok",
     "okay",
     "yes",
@@ -677,7 +663,193 @@ def normalize_load_location(value: Any) -> Optional[str]:
         return "edge"
     if text in {"3", "interior", "inside", "middle", "center", "centre", "at interior"}:
         return "interior"
+    if "corner" in text:
+        return "corner"
+    if "edge" in text:
+        return "edge"
+    if any(word in text for word in ["interior", "inside", "middle", "center", "centre"]):
+        return "interior"
     return None
+
+
+def _clamp(value: float, lower: float, upper: float) -> float:
+    if lower > upper:
+        return (lower + upper) / 2.0
+    return min(max(float(value), float(lower)), float(upper))
+
+
+def _resolve_reference_location_token(load_location: Optional[str], context_text: Optional[str] = None) -> str:
+    raw = f"{load_location or ''} {context_text or ''}".strip().lower()
+
+    is_corner = "corner" in raw
+    is_edge = "edge" in raw
+    is_interior = any(word in raw for word in ["interior", "inside", "middle", "center", "centre"])
+
+    # Corner variants by explicit symbolic coordinates.
+    if is_corner:
+        has_x0 = bool(re.search(r"x\s*=\s*0", raw))
+        has_xl = bool(re.search(r"x\s*=\s*l\b", raw))
+        has_y0 = bool(re.search(r"y\s*=\s*0", raw))
+        has_yb = bool(re.search(r"y\s*=\s*b\b", raw))
+
+        if has_xl and has_yb:
+            return "corner_xL_yB"
+        if has_x0 and has_yb:
+            return "corner_x0_yB"
+        if has_xl and has_y0:
+            return "corner_xL_y0"
+        if has_x0 and has_y0:
+            return "corner_x0_y0"
+
+        # Textual corner qualifiers.
+        right = "right" in raw
+        left = "left" in raw
+        top = "top" in raw or "upper" in raw
+        bottom = "bottom" in raw or "lower" in raw
+
+        if right and top:
+            return "corner_xL_yB"
+        if left and top:
+            return "corner_x0_yB"
+        if right and bottom:
+            return "corner_xL_y0"
+        return "corner_x0_y0"
+
+    # Edge variants by explicit symbolic coordinates.
+    if is_edge:
+        if re.search(r"edge\s*x\s*=\s*0|x\s*=\s*0\s*edge", raw) or "left edge" in raw:
+            return "edge_x0"
+        if re.search(r"edge\s*x\s*=\s*l\b|x\s*=\s*l\b\s*edge", raw) or "right edge" in raw:
+            return "edge_xL"
+        if re.search(r"edge\s*y\s*=\s*0|y\s*=\s*0\s*edge", raw) or "bottom edge" in raw:
+            return "edge_y0"
+        if re.search(r"edge\s*y\s*=\s*b\b|y\s*=\s*b\b\s*edge", raw) or "top edge" in raw:
+            return "edge_yB"
+        # Default edge interpretation when side is not specified.
+        return "edge_y0"
+
+    if is_interior:
+        return "interior"
+
+    normalized = normalize_load_location(load_location or "") or "interior"
+    if normalized == "corner":
+        return "corner_x0_y0"
+    if normalized == "edge":
+        return "edge_y0"
+    return "interior"
+
+
+def _reference_point_from_token(token: str, slab_a: float, slab_b: float) -> Tuple[float, float]:
+    if token == "corner_x0_y0":
+        return 0.0, 0.0
+    if token == "corner_xL_y0":
+        return float(slab_a), 0.0
+    if token == "corner_x0_yB":
+        return 0.0, float(slab_b)
+    if token == "corner_xL_yB":
+        return float(slab_a), float(slab_b)
+    if token == "edge_x0":
+        return 0.0, float(slab_b) / 2.0
+    if token == "edge_xL":
+        return float(slab_a), float(slab_b) / 2.0
+    if token == "edge_y0":
+        return float(slab_a) / 2.0, 0.0
+    if token == "edge_yB":
+        return float(slab_a) / 2.0, float(slab_b)
+    return float(slab_a) / 2.0, float(slab_b) / 2.0
+
+
+def _first_wheel_center_from_token(
+    token: str,
+    slab_a: float,
+    slab_b: float,
+    contact_lx_mm: float,
+    contact_ly_mm: float,
+) -> Tuple[float, float]:
+    half_x = float(contact_lx_mm) / 2.0
+    half_y = float(contact_ly_mm) / 2.0
+
+    if token == "corner_x0_y0":
+        return half_x, half_y
+    if token == "corner_xL_y0":
+        return float(slab_a) - half_x, half_y
+    if token == "corner_x0_yB":
+        return half_x, float(slab_b) - half_y
+    if token == "corner_xL_yB":
+        return float(slab_a) - half_x, float(slab_b) - half_y
+    if token == "edge_x0":
+        return half_x, float(slab_b) / 2.0
+    if token == "edge_xL":
+        return float(slab_a) - half_x, float(slab_b) / 2.0
+    if token == "edge_y0":
+        return float(slab_a) / 2.0, half_y
+    if token == "edge_yB":
+        return float(slab_a) / 2.0, float(slab_b) - half_y
+    return float(slab_a) / 2.0, float(slab_b) / 2.0
+
+
+def _dual_spacing_direction(token: str, rx: float, ry: float, slab_a: float, slab_b: float) -> Tuple[float, float]:
+    if token.startswith("corner"):
+        vx = (float(slab_a) / 2.0) - float(rx)
+        vy = (float(slab_b) / 2.0) - float(ry)
+        norm = math.hypot(vx, vy)
+        if norm <= 1e-12:
+            return 1.0, 0.0
+        return vx / norm, vy / norm
+    if token in {"edge_x0", "edge_xL"}:
+        # Parallel to vertical edge -> spacing along y.
+        return 0.0, 1.0
+    if token in {"edge_y0", "edge_yB"}:
+        # Parallel to horizontal edge -> spacing along x.
+        return 1.0, 0.0
+    # Interior/center default: longitudinal along slab length (x).
+    return 1.0, 0.0
+
+
+def _clamp_center_to_slab(
+    center_x: float,
+    center_y: float,
+    slab_a: float,
+    slab_b: float,
+    contact_lx_mm: float,
+    contact_ly_mm: float,
+) -> Tuple[float, float]:
+    half_x = float(contact_lx_mm) / 2.0
+    half_y = float(contact_ly_mm) / 2.0
+    min_cx = half_x
+    max_cx = float(slab_a) - half_x
+    min_cy = half_y
+    max_cy = float(slab_b) - half_y
+
+    if min_cx > max_cx:
+        clamped_x = float(slab_a) / 2.0
+    else:
+        clamped_x = _clamp(center_x, min_cx, max_cx)
+
+    if min_cy > max_cy:
+        clamped_y = float(slab_b) / 2.0
+    else:
+        clamped_y = _clamp(center_y, min_cy, max_cy)
+
+    return clamped_x, clamped_y
+
+
+def _center_to_bounded_patch(
+    center_x: float,
+    center_y: float,
+    contact_lx_mm: float,
+    contact_ly_mm: float,
+    slab_a: float,
+    slab_b: float,
+) -> Dict[str, float]:
+    half_x = float(contact_lx_mm) / 2.0
+    half_y = float(contact_ly_mm) / 2.0
+    return {
+        "x1": round(max(0.0, center_x - half_x), 3),
+        "x2": round(min(float(slab_a), center_x + half_x), 3),
+        "y1": round(max(0.0, center_y - half_y), 3),
+        "y2": round(min(float(slab_b), center_y + half_y), 3),
+    }
 
 
 def infer_semantic_choices(user_input: str, current_asking: Optional[str] = None) -> Dict[str, str]:
@@ -787,72 +959,14 @@ def infer_load_patch_from_contact_area(
     contact_ly_mm: float,
     context_text: Optional[str] = None,
 ) -> Dict[str, float]:
-    location = normalize_load_location(load_location) or "interior"
     slab_a = float(a)
     slab_b = float(b)
     lx = max(1.0, float(contact_lx_mm))
     ly = max(1.0, float(contact_ly_mm))
-    lowered = (context_text or "").lower()
-
-    if location == "corner":
-        return {
-            "x1": 0.0,
-            "x2": round(min(slab_a, lx), 3),
-            "y1": 0.0,
-            "y2": round(min(slab_b, ly), 3),
-        }
-
-    if location == "edge":
-        if "right edge" in lowered or "at right edge" in lowered or "on right edge" in lowered:
-            y_center = slab_b / 2.0
-            y1 = max(0.0, y_center - (ly / 2.0))
-            y2 = min(slab_b, y_center + (ly / 2.0))
-            return {
-                "x1": round(max(0.0, slab_a - lx), 3),
-                "x2": round(slab_a, 3),
-                "y1": round(y1, 3),
-                "y2": round(y2, 3),
-            }
-
-        if "left edge" in lowered or "at left edge" in lowered or "on left edge" in lowered:
-            y_center = slab_b / 2.0
-            y1 = max(0.0, y_center - (ly / 2.0))
-            y2 = min(slab_b, y_center + (ly / 2.0))
-            return {
-                "x1": 0.0,
-                "x2": round(min(slab_a, lx), 3),
-                "y1": round(y1, 3),
-                "y2": round(y2, 3),
-            }
-
-        if "top edge" in lowered or "at top edge" in lowered or "on top edge" in lowered:
-            x_center = slab_a / 2.0
-            x1 = max(0.0, x_center - (lx / 2.0))
-            x2 = min(slab_a, x_center + (lx / 2.0))
-            return {
-                "x1": round(x1, 3),
-                "x2": round(x2, 3),
-                "y1": round(max(0.0, slab_b - ly), 3),
-                "y2": round(slab_b, 3),
-            }
-
-        x_center = slab_a / 2.0
-        x1 = max(0.0, x_center - (lx / 2.0))
-        return {
-            "x1": round(x1, 3),
-            "x2": round(min(slab_a, x1 + lx), 3),
-            "y1": 0.0,
-            "y2": round(min(slab_b, ly), 3),
-        }
-
-    x1 = max(0.0, (slab_a - lx) / 2.0)
-    y1 = max(0.0, (slab_b - ly) / 2.0)
-    return {
-        "x1": round(x1, 3),
-        "x2": round(min(slab_a, x1 + lx), 3),
-        "y1": round(y1, 3),
-        "y2": round(min(slab_b, y1 + ly), 3),
-    }
+    location_token = _resolve_reference_location_token(load_location, context_text)
+    cx, cy = _first_wheel_center_from_token(location_token, slab_a, slab_b, lx, ly)
+    cx, cy = _clamp_center_to_slab(cx, cy, slab_a, slab_b, lx, ly)
+    return _center_to_bounded_patch(cx, cy, lx, ly, slab_a, slab_b)
 
 
 def _extract_spacing_mm(text: str) -> Optional[float]:
@@ -865,6 +979,30 @@ def _extract_spacing_mm(text: str) -> Optional[float]:
         if not match:
             continue
         return _length_to_mm(float(match.group(1)), match.group(2))
+    return None
+
+
+def _extract_wheel_spacing_mm(text: str) -> Optional[float]:
+    patterns = [
+        r"(?:wheel\s*spacing|dual\s*wheel\s*spacing|center\s*to\s*center|centre\s*to\s*centre|c\s*/\s*c)\s*(?:of|=|:|is)?\s*(\d+(?:\.\d+)?)\s*(mm|cm|m|meter|meters)",
+        r"(\d+(?:\.\d+)?)\s*(mm|cm|m|meter|meters)\s*(?:wheel\s*spacing|dual\s*wheel\s*spacing|center\s*to\s*center|centre\s*to\s*centre|c\s*/\s*c)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return _length_to_mm(float(match.group(1)), match.group(2))
+    return None
+
+
+def _extract_axle_spacing_mm(text: str) -> Optional[float]:
+    patterns = [
+        r"(?:axle\s*spacing|spacing\s*between\s*axles|tandem\s*spacing)\s*(?:of|=|:|is)?\s*(\d+(?:\.\d+)?)\s*(mm|cm|m|meter|meters)",
+        r"(\d+(?:\.\d+)?)\s*(mm|cm|m|meter|meters)\s*(?:axle\s*spacing|spacing\s*between\s*axles|tandem\s*spacing)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if match:
+            return _length_to_mm(float(match.group(1)), match.group(2))
     return None
 
 
@@ -961,7 +1099,8 @@ def _compute_patch_from_description(
             cy = float(distances["bottom"])
         elif "top" in distances:
             cy = slab_b - float(distances["top"])
-        return _center_to_patch(cx, cy, contact_lx_mm, contact_ly_mm)
+        cx, cy = _clamp_center_to_slab(cx, cy, slab_a, slab_b, contact_lx_mm, contact_ly_mm)
+        return _center_to_bounded_patch(cx, cy, contact_lx_mm, contact_ly_mm, slab_a, slab_b)
 
     # Priority 2: named location
     resolved = normalize_load_location(load_location or "")
@@ -974,7 +1113,8 @@ def _compute_patch_from_description(
 
     # Priority 3: "center of slab" / "middle" shorthand
     if re.search(r"\bcenter\s*of\s*slab\b|\bmiddle\s*of\s*slab\b|\bslab\s*center\b", lowered):
-        return _center_to_patch(slab_a / 2.0, slab_b / 2.0, contact_lx_mm, contact_ly_mm)
+        cx, cy = _clamp_center_to_slab(slab_a / 2.0, slab_b / 2.0, slab_a, slab_b, contact_lx_mm, contact_ly_mm)
+        return _center_to_bounded_patch(cx, cy, contact_lx_mm, contact_ly_mm, slab_a, slab_b)
 
     return None
 
@@ -989,202 +1129,75 @@ def _build_group_wheel_load_cases(
     load_location: str,
     text: str,
     q_value: float,
-    mesh_type: str,
+    is_tandem: bool = False,
+    wheels_per_axle: int = 1,
+    axle_spacing_mm: Optional[float] = None,
 ) -> List[Dict[str, float]]:
-    location = normalize_load_location(load_location) or "interior"
-    distances = _extract_edge_distances_mm(text)
-    edge_lock_x = False
-    edge_lock_y = False
-
-    cx = slab_a / 2.0
-    cy = slab_b / 2.0
-
-    if "left" in distances:
-        cx = distances["left"]
-    if "right" in distances:
-        cx = slab_a - distances["right"]
-    if "bottom" in distances:
-        cy = distances["bottom"]
-    if "top" in distances:
-        cy = slab_b - distances["top"]
-
-    explicit_x_distance = "left" in distances or "right" in distances
-    explicit_y_distance = "bottom" in distances or "top" in distances
-
-    if location == "edge":
-        if "bottom" in text and "bottom" not in distances:
-            cy = contact_ly_mm / 2.0
-            edge_lock_y = True
-        elif "top" in text and "top" not in distances:
-            cy = slab_b - (contact_ly_mm / 2.0)
-            edge_lock_y = True
-        elif "left" in text and "left" not in distances:
-            cx = contact_lx_mm / 2.0
-            edge_lock_x = True
-        elif "right" in text and "right" not in distances:
-            cx = slab_a - (contact_lx_mm / 2.0)
-            edge_lock_x = True
-        elif all(side not in text for side in ["top", "bottom", "left", "right"]):
-            cy = contact_ly_mm / 2.0
-            edge_lock_y = True
-
-    if location == "corner":
-        if "top" in text and "right" in text:
-            cx = slab_a - (contact_lx_mm / 2.0)
-            cy = slab_b - (contact_ly_mm / 2.0)
-        elif "top" in text:
-            cx = contact_lx_mm / 2.0
-            cy = slab_b - (contact_ly_mm / 2.0)
-        elif "right" in text:
-            cx = slab_a - (contact_lx_mm / 2.0)
-            cy = contact_ly_mm / 2.0
-        else:
-            cx = contact_lx_mm / 2.0
-            cy = contact_ly_mm / 2.0
-
-    axis = "y"
-    if any(k in distances for k in ["left", "right"]) or ("left edge" in text or "right edge" in text):
-        axis = "y"
-    elif any(k in distances for k in ["top", "bottom"]) or ("top edge" in text or "bottom edge" in text):
-        axis = "x"
-    elif location == "edge":
-        axis = "x"
-
-    level = normalize_mesh_type(mesh_type) or "coarse"
-    elements = max(1, int(MESH_LEVEL_ELEMENTS.get(level, MESH_LEVEL_ELEMENTS["coarse"])))
-    mesh_dx = float(slab_a) / elements
-    mesh_dy = float(slab_b) / elements
-
-    contact_x = float(contact_lx_mm)
-    contact_y = float(contact_ly_mm)
-    if level == "fine":
-        # Fine mesh guardrail: contact patch should be at least one mesh step.
-        contact_x = max(contact_x, mesh_dx)
-        contact_y = max(contact_y, mesh_dy)
-
-    half_x = contact_x / 2.0
-    half_y = contact_y / 2.0
-
-    wheels = max(1, int(number_of_wheels))
+    contact_x = max(1.0, float(contact_lx_mm))
+    contact_y = max(1.0, float(contact_ly_mm))
     spacing = max(0.0, float(spacing_mm))
-    offsets = [((i - (wheels - 1) / 2.0) * spacing) for i in range(wheels)]
 
-    # Corner boundary condition takes highest priority over mesh alignment.
-    # For corner loading, keep first wheel exactly touching both edges.
-    if location == "corner":
-        first_cx = half_x
-        first_cy = half_y
+    location_token = _resolve_reference_location_token(load_location, text)
+    rx, ry = _reference_point_from_token(location_token, slab_a, slab_b)
 
-        if wheels == 1:
-            patch = _center_to_patch(first_cx, first_cy, contact_x, contact_y)
-            return [
-                {
-                    "x1": float(patch["x1"]),
-                    "x2": float(patch["x2"]),
-                    "y1": float(patch["y1"]),
-                    "y2": float(patch["y2"]),
-                    "q": float(q_value),
-                }
-            ]
+    cx1, cy1 = _first_wheel_center_from_token(location_token, slab_a, slab_b, contact_x, contact_y)
+    cx1, cy1 = _clamp_center_to_slab(cx1, cy1, slab_a, slab_b, contact_x, contact_y)
 
-        centers: List[Tuple[float, float]] = [(first_cx, first_cy)]
+    dual_dx, dual_dy = _dual_spacing_direction(location_token, rx, ry, slab_a, slab_b)
+    centers: List[Tuple[float, float]] = []
 
-        # Dual/tridem extension from first wheel uses center spacing (not rectangle spacing).
-        # Prefer x-direction first; if not feasible, extend in y-direction.
-        def _can_place_x(index: int) -> bool:
-            cx_try = first_cx + (index * spacing)
-            return (cx_try + half_x) <= slab_a
+    if is_tandem:
+        per_axle = max(1, int(wheels_per_axle))
+        axle_spacing = max(0.0, float(axle_spacing_mm if axle_spacing_mm is not None else spacing))
 
-        def _can_place_y(index: int) -> bool:
-            cy_try = first_cy + (index * spacing)
-            return (cy_try + half_y) <= slab_b
+        for axle_idx in range(2):
+            axle_cx = cx1 + (axle_idx * axle_spacing)
+            axle_cy = cy1
+            if per_axle == 1:
+                cxi, cyi = _clamp_center_to_slab(axle_cx, axle_cy, slab_a, slab_b, contact_x, contact_y)
+                centers.append((cxi, cyi))
+                continue
 
-        use_x_axis = _can_place_x(wheels - 1)
-        if not use_x_axis and not _can_place_y(wheels - 1):
-            # If spacing is too large for both directions, place as far as possible in x while
-            # preserving first wheel boundary condition.
-            use_x_axis = True
-
-        for i in range(1, wheels):
-            if use_x_axis:
-                cx_i = first_cx + (i * spacing)
-                cx_i = min(max(cx_i, half_x), slab_a - half_x)
-                centers.append((cx_i, first_cy))
-            else:
-                cy_i = first_cy + (i * spacing)
-                cy_i = min(max(cy_i, half_y), slab_b - half_y)
-                centers.append((first_cx, cy_i))
-
-        load_cases: List[Dict[str, float]] = []
-        for cxi, cyi in centers:
-            patch = _center_to_patch(cxi, cyi, contact_x, contact_y)
-            load_cases.append(
-                {
-                    "x1": float(patch["x1"]),
-                    "x2": float(patch["x2"]),
-                    "y1": float(patch["y1"]),
-                    "y2": float(patch["y2"]),
-                    "q": float(q_value),
-                }
-            )
-        return load_cases
-
-    # Preserve spacing exactly by constraining and snapping only the group center.
-    if axis == "x":
-        min_off = min(offsets)
-        max_off = max(offsets)
-        min_cx = half_x - min_off
-        max_cx = slab_a - half_x - max_off
-        min_cy = half_y
-        max_cy = slab_b - half_y
+            for wheel_idx in range(per_axle):
+                wheel_cx = axle_cx + (wheel_idx * spacing * dual_dx)
+                wheel_cy = axle_cy + (wheel_idx * spacing * dual_dy)
+                cxi, cyi = _clamp_center_to_slab(wheel_cx, wheel_cy, slab_a, slab_b, contact_x, contact_y)
+                centers.append((cxi, cyi))
     else:
-        min_off = min(offsets)
-        max_off = max(offsets)
-        min_cx = half_x
-        max_cx = slab_a - half_x
-        min_cy = half_y - min_off
-        max_cy = slab_b - half_y - max_off
+        wheels = max(1, int(number_of_wheels))
+        for wheel_idx in range(wheels):
+            wheel_cx = cx1 + (wheel_idx * spacing * dual_dx)
+            wheel_cy = cy1 + (wheel_idx * spacing * dual_dy)
+            cxi, cyi = _clamp_center_to_slab(wheel_cx, wheel_cy, slab_a, slab_b, contact_x, contact_y)
+            centers.append((cxi, cyi))
 
-    # If spacing is too large for slab, collapse to nearest feasible center while keeping wheel offsets fixed.
-    if min_cx > max_cx:
-        mid = slab_a / 2.0
-        min_cx = mid
-        max_cx = mid
-    if min_cy > max_cy:
-        mid = slab_b / 2.0
-        min_cy = mid
-        max_cy = mid
+    if not centers:
+        centers = [(cx1, cy1)]
 
-    cx = min(max(cx, min_cx), max_cx)
-    cy = min(max(cy, min_cy), max_cy)
+    expected_count = max(1, int(number_of_wheels))
+    if len(centers) > expected_count:
+        centers = centers[:expected_count]
 
-    x_nodes = _linspace_nodes(slab_a, elements)
-    y_nodes = _linspace_nodes(slab_b, elements)
-    snapped_cx = _nearest_mesh_point(cx, x_nodes)
-    snapped_cy = _nearest_mesh_point(cy, y_nodes)
-
-    # Preserve user-specified interior distances first; only snap if mesh deviation is small.
-    if explicit_x_distance and abs(snapped_cx - cx) >= (mesh_dx / 2.0):
-        snapped_cx = cx
-    if explicit_y_distance and abs(snapped_cy - cy) >= (mesh_dy / 2.0):
-        snapped_cy = cy
-
-    # Boundary condition priority: edge-constrained axis should not move to mesh nodes.
-    if edge_lock_x:
-        snapped_cx = cx
-    if edge_lock_y:
-        snapped_cy = cy
-
-    # Keep spacing priority: after snap, shift center only as needed to remain inside boundaries.
-    cx = min(max(snapped_cx, min_cx), max_cx)
-    cy = min(max(snapped_cy, min_cy), max_cy)
+    # Geometry validation: ensure center spacing is preserved when feasible.
+    # Corner/edge constraints can force clamping; this check is tolerant and non-fatal.
+    spacing_tolerance_mm = 1.0
+    if is_tandem:
+        per_axle = max(1, int(wheels_per_axle))
+        if per_axle >= 2 and spacing > 0.0:
+            for axle_idx in range(2):
+                start = axle_idx * per_axle
+                if start + 1 < len(centers):
+                    p1 = centers[start]
+                    p2 = centers[start + 1]
+                    _ = abs(math.hypot(p2[0] - p1[0], p2[1] - p1[1]) - spacing) <= spacing_tolerance_mm
+    elif len(centers) >= 2 and spacing > 0.0:
+        p1 = centers[0]
+        p2 = centers[1]
+        _ = abs(math.hypot(p2[0] - p1[0], p2[1] - p1[1]) - spacing) <= spacing_tolerance_mm
 
     load_cases: List[Dict[str, float]] = []
-    for offset in offsets:
-        wheel_cx = cx + offset if axis == "x" else cx
-        wheel_cy = cy + offset if axis == "y" else cy
-
-        patch = _center_to_patch(wheel_cx, wheel_cy, contact_x, contact_y)
+    for center_x, center_y in centers:
+        patch = _center_to_bounded_patch(center_x, center_y, contact_x, contact_y, slab_a, slab_b)
         load_cases.append(
             {
                 "x1": float(patch["x1"]),
@@ -1241,45 +1254,6 @@ def apply_implicit_inferences(params: Dict[str, Any], user_provided_keys: List[s
                 notes.append(f"Inferred load patch coordinates for '{location}' location.")
 
     return applied, notes
-
-
-def check_use_all_defaults_intent(user_input: str) -> bool:
-    lower_input = (user_input or "").lower().strip()
-    compact = " ".join(lower_input.split())
-    # Normalize punctuation so phrasing variants like
-    # "take all the default values for all the params" are caught consistently.
-    compact = re.sub(r"[^a-z0-9\s]", " ", compact)
-    compact = " ".join(compact.split())
-
-    if not compact:
-        return False
-
-    # Respect explicit negations such as "do not use defaults".
-    if re.search(r"\b(?:dont|do not|not|no|avoid|without)\b.{0,24}\bdefaults?\b", compact):
-        return False
-
-    if any(pattern in compact for pattern in USE_ALL_DEFAULTS_PATTERNS):
-        return True
-
-    # Heuristic catch-all for natural variants.
-    has_default = bool(re.search(r"\bdefaults?\b", compact))
-    has_action = any(token in compact for token in ["use", "take", "fill", "set", "apply", "keep", "go with"])
-    has_scope = any(
-        token in compact
-        for token in [
-            "all params",
-            "all the params",
-            "all parameters",
-            "all the parameters",
-            "all values",
-            "everything",
-            "remaining",
-            "the rest",
-            "rest of",
-        ]
-    )
-
-    return has_default and has_action and has_scope
 
 
 def convert_to_standard_unit(value: float, from_unit: str, param_key: str) -> Tuple[float, str]:
@@ -1904,11 +1878,25 @@ def _extract_engineering_candidates(text: str) -> Tuple[Dict[str, Any], Dict[str
     if load_match is None and area_lx_mm is not None and area_ly_mm is not None:
         load_match = re.search(r"\b(\d+(?:\.\d+)?)\s*(kn|n|t\b|ton|tons|tonne|tonnes|kg|kgf)\b(?!\s*/)", lowered)
 
-    spacing_mm = _extract_spacing_mm(lowered)
-    tandem_requested = bool(
-        re.search(r"\btandem\s*axle\b|\btandem\b|\bdual\s*wheel\b|\bdouble\s*wheel\b", lowered)
-    )
-    number_of_wheels = _detect_number_of_wheels(lowered)
+    generic_spacing_mm = _extract_spacing_mm(lowered)
+    wheel_spacing_mm = _extract_wheel_spacing_mm(lowered)
+    axle_spacing_mm = _extract_axle_spacing_mm(lowered)
+
+    tandem_requested = bool(re.search(r"\btandem\s*axle\b|\btandem\b", lowered))
+    dual_requested = bool(re.search(r"\bdual\s*wheel\b|\bdouble\s*wheel\b|\bdual\b", lowered))
+
+    if wheel_spacing_mm is None:
+        wheel_spacing_mm = generic_spacing_mm
+
+    if tandem_requested:
+        wheels_per_axle = 2 if dual_requested else 1
+        number_of_wheels = 2 * wheels_per_axle
+    else:
+        wheels_per_axle = max(1, _detect_number_of_wheels(lowered))
+        number_of_wheels = wheels_per_axle
+
+    if tandem_requested and axle_spacing_mm is None:
+        axle_spacing_mm = generic_spacing_mm
 
     inferred_location = infer_semantic_choices(text).get(LOAD_LOCATION_KEY)
     slab_a = float(out["a"]) if "a" in out else float(DEFAULT_VALUES["a"])
@@ -1958,8 +1946,12 @@ def _extract_engineering_candidates(text: str) -> Tuple[Dict[str, Any], Dict[str
         )
 
         group_location = inferred_location or (normalize_load_location(out.get("load_location")) if isinstance(out.get("load_location"), str) else None) or "interior"
-        spacing_for_group = spacing_mm if isinstance(spacing_mm, (int, float)) else float(area_lx_mm)
-        mesh_for_group = infer_semantic_choices(text).get(MESH_TYPE_KEY) or (str(out.get(MESH_TYPE_KEY)) if MESH_TYPE_KEY in out else "coarse")
+        spacing_for_group = wheel_spacing_mm if isinstance(wheel_spacing_mm, (int, float)) else float(area_lx_mm)
+        axle_spacing_for_group = (
+            float(axle_spacing_mm)
+            if isinstance(axle_spacing_mm, (int, float))
+            else float(spacing_for_group)
+        )
         load_cases = _build_group_wheel_load_cases(
             number_of_wheels=number_of_wheels,
             spacing_mm=float(spacing_for_group),
@@ -1970,7 +1962,9 @@ def _extract_engineering_candidates(text: str) -> Tuple[Dict[str, Any], Dict[str
             load_location=group_location,
             text=lowered,
             q_value=float(q_val),
-            mesh_type=mesh_for_group,
+            is_tandem=tandem_requested,
+            wheels_per_axle=wheels_per_axle,
+            axle_spacing_mm=axle_spacing_for_group,
         )
 
     if load_cases:
@@ -1984,36 +1978,26 @@ def _extract_engineering_candidates(text: str) -> Tuple[Dict[str, Any], Dict[str
             5,
         )
 
-        base_patch = infer_load_patch_from_contact_area(
-            inferred_location,
-            slab_a,
-            slab_b,
-            area_lx_mm,
-            area_ly_mm,
-            lowered,
+        spacing_for_group = wheel_spacing_mm if isinstance(wheel_spacing_mm, (int, float)) else float(area_lx_mm)
+        axle_spacing_for_group = (
+            float(axle_spacing_mm)
+            if isinstance(axle_spacing_mm, (int, float))
+            else float(spacing_for_group)
         )
-        second_patch = _offset_load_patch(
-            base_patch,
-            spacing_mm if isinstance(spacing_mm, (int, float)) else float(area_lx_mm),
-            slab_a,
-            slab_b,
+        load_cases = _build_group_wheel_load_cases(
+            number_of_wheels=number_of_wheels,
+            spacing_mm=float(spacing_for_group),
+            slab_a=slab_a,
+            slab_b=slab_b,
+            contact_lx_mm=float(area_lx_mm),
+            contact_ly_mm=float(area_ly_mm),
+            load_location=inferred_location,
+            text=lowered,
+            q_value=float(q_val),
+            is_tandem=True,
+            wheels_per_axle=wheels_per_axle,
+            axle_spacing_mm=axle_spacing_for_group,
         )
-        load_cases = [
-            {
-                "x1": float(base_patch["x1"]),
-                "x2": float(base_patch["x2"]),
-                "y1": float(base_patch["y1"]),
-                "y2": float(base_patch["y2"]),
-                "q": float(q_val),
-            },
-            {
-                "x1": float(second_patch["x1"]),
-                "x2": float(second_patch["x2"]),
-                "y1": float(second_patch["y1"]),
-                "y2": float(second_patch["y2"]),
-                "q": float(q_val),
-            },
-        ]
         out["load_cases"] = load_cases
         out.update(load_cases[0])
     elif area_lx_mm is not None and area_ly_mm is not None:
@@ -2373,7 +2357,7 @@ def process_user_input_with_llm(
 
     stripped_input = user_input.strip().lower()
 
-    if current_asking and stripped_input in SINGLE_DEFAULT_PATTERNS:
+    if current_asking and stripped_input in SINGLE_DEFAULT_PATTERNS and not _contains_default_keyword(user_input):
         return {
             "understood_value": None,
             "use_default": True,
@@ -2499,15 +2483,6 @@ def process_user_input_with_llm(
             "extracted_multiple": extracted_multiple,
             "extracted_units": extracted_units,
             "conversation_only": False,
-        }
-
-    if check_use_all_defaults_intent(user_input):
-        return {
-            "understood_value": None,
-            "use_default": False,
-            "use_all_defaults": True,
-            "needs_clarification": False,
-            "friendly_response": "Got it! I'll use the default values for all remaining parameters.",
         }
 
     # Deterministic guided fallback: if we're asking a specific field and the

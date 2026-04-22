@@ -435,81 +435,96 @@ export default function ParamsPanel(props: {
               <h3>Export</h3>
             </div>
             <div className="card-body">
-              {!finalConfirmed ? (
+              {!finalConfirmed && (
                 <>
                   <div className="sub" style={{ marginBottom: '12px' }}>
-                    Export is disabled until you confirm.
+                    Review your configuration, then enable export to unlock analysis and reporting tools.
                   </div>
                   <button
                     className="btn primary"
-                    style={{ width: '100%' }}
+                    style={{ width: '100%', marginBottom: '10px' }}
                     disabled={busy}
                     onClick={onConfirmFinal}
+                    data-tour="enable-export"
                   >
                     Enable export
                   </button>
                 </>
-              ) : (
-                <>
-                  <button
-                    className="btn primary"
-                    style={{ width: '100%' }}
-                    onClick={() => {
-                      void onGenerateAnalysis()
-                    }}
-                    disabled={busy || analysisBusy}
-                  >
-                    {analysisBusy ? 'Generating Analysis...' : 'Generate Analysis'}
-                  </button>
-
-                  {analysisError && (
-                    <div className="status-detail warning" style={{ marginTop: '12px' }}>
-                      {analysisError}
-                    </div>
-                  )}
-
-                  {analysisResult && (
-                    <div
-                      className="status-detail"
-                      style={{
-                        marginTop: '12px',
-                        borderColor: analysisResult.success ? 'var(--success)' : 'var(--danger)',
-                      }}
-                    >
-                      <strong>{analysisResult.success ? 'Analysis completed.' : 'Analysis failed.'}</strong>
-                      <div>{analysisResult.message}</div>
-                      {analysisResult.vtk_file && <div>VTK: {analysisResult.vtk_file}</div>}
-                      {analysisResult.summary_file && <div>Summary: {analysisResult.summary_file}</div>}
-                      {analysisResult.results_file && <div>Results: {analysisResult.results_file}</div>}
-                    </div>
-                  )}
-
-                  <button
-                    className="btn primary"
-                    style={{ width: '100%', marginTop: '10px' }}
-                    onClick={() => {
-                      const sanitized = sanitizeExportPayload(finalParams)
-                      const prettyJson = JSON.stringify(sanitized, null, 2)
-                      const blob = new Blob([prettyJson], { type: 'application/json' })
-                      downloadBlob('pavement-config.json', blob)
-                    }}
-                  >
-                    Export Final JSON
-                  </button>
-
-                  <button
-                    className="btn"
-                    style={{ width: '100%', marginTop: '10px' }}
-                    onClick={() => {
-                      const txt = toTxtReport(sanitizeExportPayload(finalParams))
-                      const blob = new Blob([txt], { type: 'text/plain' })
-                      downloadBlob('pavement-config.txt', blob)
-                    }}
-                  >
-                    Export Text Report
-                  </button>
-                </>
               )}
+
+              <button
+                className="btn primary"
+                style={{
+                  width: '100%',
+                  ...(!finalConfirmed && { opacity: 0.45, cursor: 'not-allowed' }),
+                }}
+                onClick={() => { void onGenerateAnalysis() }}
+                disabled={busy || analysisBusy || !finalConfirmed}
+                data-tour="generate-analysis"
+              >
+                {analysisBusy ? 'Generating Analysis...' : 'Generate Analysis'}
+              </button>
+
+              {analysisError && (
+                <div className="status-detail warning" style={{ marginTop: '12px' }}>
+                  {analysisError}
+                </div>
+              )}
+
+              {analysisResult && (
+                <div
+                  className="status-detail"
+                  style={{
+                    marginTop: '12px',
+                    borderColor: analysisResult.success ? 'var(--success)' : 'var(--danger)',
+                  }}
+                >
+                  <strong>{analysisResult.success ? 'Analysis completed.' : 'Analysis failed.'}</strong>
+                  <div>{analysisResult.message}</div>
+                  {analysisResult.vtk_file && <div>VTK: {analysisResult.vtk_file}</div>}
+                  {analysisResult.summary_file && <div>Summary: {analysisResult.summary_file}</div>}
+                  {analysisResult.results_file && <div>Results: {analysisResult.results_file}</div>}
+                </div>
+              )}
+
+              <button
+                className="btn primary"
+                style={{
+                  width: '100%',
+                  marginTop: '10px',
+                  ...(!finalConfirmed && { opacity: 0.45, cursor: 'not-allowed' }),
+                }}
+                disabled={!finalConfirmed}
+                onClick={() => {
+                  if (!finalConfirmed) return
+                  const sanitized = sanitizeExportPayload(finalParams)
+                  const prettyJson = JSON.stringify(sanitized, null, 2)
+                  const blob = new Blob([prettyJson], { type: 'application/json' })
+                  downloadBlob('pavement-config.json', blob)
+                }}
+                data-tour="export-json"
+              >
+                Export Final JSON
+              </button>
+
+              <button
+                className="btn"
+                style={{
+                  width: '100%',
+                  marginTop: '10px',
+                  ...(!finalConfirmed && { opacity: 0.45, cursor: 'not-allowed' }),
+                }}
+                disabled={!finalConfirmed}
+                onClick={() => {
+                  if (!finalConfirmed) return
+                  const txt = toTxtReport(sanitizeExportPayload(finalParams))
+                  const blob = new Blob([txt], { type: 'text/plain' })
+                  downloadBlob('pavement-config.txt', blob)
+                }}
+                data-tour="export-text"
+              >
+                Export Text Report
+              </button>
             </div>
           </div>
         </div>

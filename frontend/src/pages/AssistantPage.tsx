@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ChatPanel from '../components/ChatPanel'
 import OllamaSettings from '../components/OllamaSettings'
-import OnboardingTour, { shouldShowTour } from '../components/OnboardingTour'
+import OnboardingTour, { ExportTour, shouldShowTour } from '../components/OnboardingTour'
 import ParamsPanel from '../components/ParamsPanel'
 import { API_BASE_URL, apiChat, apiGenerateAnalysis, apiGetSchema, apiHealth, apiOllamaStatus, apiReset } from '../lib/api'
 import type { ChatMessage, ConversationState, GenerateAnalysisResponse, OllamaCheckState, SchemaResponse } from '../lib/types'
@@ -78,6 +78,11 @@ export default function AssistantPage() {
   // Onboarding tour
   const [showTour, setShowTour] = useState(false)
 
+  // Export tour
+  const [showExportTour, setShowExportTour] = useState(false)
+  const prevFinalParamsRef = useRef<Record<string, unknown> | null>(null)
+  const exportTourTriggeredRef = useRef(false)
+
   // Param change highlighting
   const [highlightedParams, setHighlightedParams] = useState<Set<string>>(new Set())
   const highlightTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
@@ -115,6 +120,28 @@ export default function AssistantPage() {
       return () => clearTimeout(t)
     }
   }, [busy, state, backendHealthy])
+
+  // Smooth-scroll to export section and show export tour when all params are captured
+  useEffect(() => {
+    const prev = prevFinalParamsRef.current
+    prevFinalParamsRef.current = finalParams
+
+    if (finalParams === null) {
+      exportTourTriggeredRef.current = false
+      setShowExportTour(false)
+      return
+    }
+
+    if (prev === null && !exportTourTriggeredRef.current) {
+      exportTourTriggeredRef.current = true
+      const target = document.querySelector<HTMLElement>('[data-tour="enable-export"]')
+      if (target) {
+        target.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      }
+      const t = setTimeout(() => setShowExportTour(true), 900)
+      return () => clearTimeout(t)
+    }
+  }, [finalParams])
 
   // Track param changes and highlight affected rows
   useEffect(() => {
@@ -554,6 +581,7 @@ export default function AssistantPage() {
           }}
        />
        {showTour && <OnboardingTour onDone={() => setShowTour(false)} />}
+       {showExportTour && <ExportTour onDone={() => setShowExportTour(false)} />}
     </div>
   )
 }

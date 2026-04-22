@@ -33,6 +33,7 @@ class LookupIntent:
     component: Optional[str] = None
     use_abs: bool = False
     with_plot: bool = False
+    field_explicit: bool = True  # False when field was a fallback default, not user-specified
 
 
 _FIELD_ALIASES: Dict[str, List[str]] = {
@@ -134,6 +135,12 @@ _PLOT_REQUEST_HINTS = (
     "display plots",
 )
 
+# Generic stress terms that indicate a cross-field scan is needed instead of a single-field aggregate.
+_GENERIC_STRESS_TERMS = frozenset({"stress", "sigma"})
+
+# The four primary flexural stress fields reported across surfaces.
+_FLEXURAL_STRESS_FIELDS: List[str] = ["sxx_top", "sxx_bottom", "syy_top", "syy_bottom"]
+
 # Questions asking for qualitative interpretation should bypass deterministic lookup
 # and be handled by the intelligent VTK agent (generate_vtk_agent_response).
 _QUALITATIVE_ANALYSIS_TERMS = frozenset({
@@ -152,6 +159,28 @@ _FIELD_LISTING_TERMS = frozenset({
 
 def _normalize_text(text: str) -> str:
     return " ".join((text or "").strip().lower().split())
+
+
+def _default_aggregate_field_for_query(text: str, detected_field: Optional[str]) -> Optional[str]:
+    """Return the appropriate default field for an aggregate query.
+
+    Returns None when generic stress is detected without a specific stress field,
+    signalling the caller to route to flexural (multi-field scan) instead of a
+    single-field aggregate.  Returns 'w' when no field and no stress context are found.
+
+    Priority order:
+    1. If stress terms present and detected_field is None or the weak 'w' default → None.
+    2. If a specific non-'w' field was detected → return it.
+    3. Fall back to 'w' (deflection default).
+    """
+    lowered = _normalize_text(text)
+    if any(term in lowered for term in _GENERIC_STRESS_TERMS):
+        # Return None unless the user named an explicit stress field (not the 'w' default).
+        if detected_field is None or detected_field == "w":
+            return None
+    if detected_field is not None:
+        return detected_field
+    return "w"
 
 
 def _safe_parse_json_object(text: str) -> Optional[Dict]:
@@ -236,9 +265,14 @@ def _detect_field(text: str) -> Optional[str]:
     lowered = _normalize_text(text)
 
     # Prefer exact known aliases.
+    # Single-character aliases (e.g. "w", "u", "v") must be whole-word matches to avoid
+    # false positives like "w" matching inside "what" or "u" inside "output".
     for canonical, aliases in _FIELD_ALIASES.items():
         for alias in aliases:
-            if alias in lowered:
+            if len(alias) == 1:
+                if re.search(r"\b" + re.escape(alias) + r"\b", lowered):
+                    return canonical
+            elif alias in lowered:
                 return canonical
 
     # If user gave an explicit solver-style field token, preserve it.
@@ -323,9 +357,11 @@ def _parse_intent(
         return LookupIntent(action="flexural", vtk_file=vtk_file, with_plot=with_plot)
 
     if agg:
-        if not field:
-            # Sensible default when user asks generic aggregation on displacement/results.
-            field = "w"
+        detected_field = field
+        field = _default_aggregate_field_for_query(lowered, detected_field)
+        if field is None:
+            # Generic stress query with no specific field: route to flexural report.
+            return LookupIntent(action="flexural", vtk_file=vtk_file, with_plot=False)
         return LookupIntent(
             action="aggregate",
             vtk_file=vtk_file,
@@ -333,6 +369,7 @@ def _parse_intent(
             field=field,
             component=component,
             use_abs=use_abs,
+            field_explicit=(detected_field is not None),
         )
 
     if _is_plot_request(lowered):
@@ -377,6 +414,7 @@ def _build_planner_prompt(
         "- plots: asks to show/view generated plots or contour images.\n"
         "- none: unrelated to VTK results.\n"
         "- For aggregate, if no field is explicit but user asks deflection/displacement, use field='w'.\n"
+        "- For aggregate, if no field is explicit but user asks stress, route to flexural instead.\n"
         "- Prefer field names from AVAILABLE_FIELDS.\n"
         "- If the message is unrelated and allow_implicit is false, choose none.\n\n"
         f"allow_implicit={str(bool(allow_implicit)).lower()}\n"
@@ -437,11 +475,15 @@ def _parse_agentic_intent(
         requested_component = payload.get("component")
         requested_agg = payload.get("aggregation")
 
-        field = _detect_field(str(requested_field)) if requested_field else None
-        if not field:
-            field = _detect_field(user_input)
-        if not field:
-            field = "w"
+        detected_field = _detect_field(str(requested_field)) if requested_field else None
+        if not detected_field:
+            detected_field = _detect_field(user_input)
+
+        field = _default_aggregate_field_for_query(user_input, detected_field)
+        if field is None:
+            # Generic stress query: route to flexural report.
+            with_plot = bool(payload.get("with_plot")) or _is_plot_request(user_input)
+            return LookupIntent(action="flexural", vtk_file=vtk_file, with_plot=with_plot)
 
         aggregation = _coerce_aggregation(str(requested_agg) if requested_agg is not None else None)
         if not aggregation:
@@ -463,6 +505,7 @@ def _parse_agentic_intent(
             field=field,
             component=component,
             use_abs=use_abs,
+            field_explicit=(detected_field is not None),
         )
 
     return None
@@ -533,29 +576,32 @@ def _format_flexural_response(payload: Dict, api_base_url: str = "") -> str:
     lines = [
         "### Flexural Stress Analysis",
         "",
-        "| Field | Surface | Max (MPa) | Min (MPa) | Mean (MPa) |",
-        "|-------|---------|-----------|-----------|------------|",
+        "| Field | Surface | Statistic | Value (MPa) |",
+        "|-------|---------|-----------|-------------|",
     ]
 
     field_order = ["sxx_top", "sxx_bottom", "syy_top", "syy_bottom"]
     labels = {
-        "sxx_top": "σ_x",
-        "sxx_bottom": "σ_x",
-        "syy_top": "σ_y",
-        "syy_bottom": "σ_y",
+        "sxx_top": ("σ_x", "Top"),
+        "sxx_bottom": ("σ_x", "Bottom"),
+        "syy_top": ("σ_y", "Top"),
+        "syy_bottom": ("σ_y", "Bottom"),
     }
+    stat_specs = [("max", "Max"), ("min", "Min"), ("mean", "Mean")]
 
     for field_name in field_order:
         r = results.get(field_name)
         if r is None:
             continue
+        label, surface = labels[field_name]
         if not r.get("available", False):
-            lines.append(f"| {labels[field_name]} | {r['surface']} | N/A | N/A | N/A |")
+            for _, stat_label in stat_specs:
+                lines.append(f"| {label} | {surface} | {stat_label} | N/A |")
             continue
-        mx = f"{r['max']:.6g}" if r["max"] is not None else "N/A"
-        mn = f"{r['min']:.6g}" if r["min"] is not None else "N/A"
-        me = f"{r['mean']:.6g}" if r["mean"] is not None else "N/A"
-        lines.append(f"| {labels[field_name]} | {r['surface']} | {mx} | {mn} | {me} |")
+        for stat_key, stat_label in stat_specs:
+            val = r.get(stat_key)
+            val_str = f"{val:.6g}" if val is not None else "N/A"
+            lines.append(f"| {label} | {surface} | {stat_label} | {val_str} |")
 
     if missing:
         lines.append(f"\n> Missing fields: {', '.join(missing)}")
@@ -742,6 +788,77 @@ def _narrate_plots_with_kimi(
         return None
 
 
+_GLOBAL_STRESS_LABELS = {
+    "sxx_top": ("σ_x", "Top"),
+    "sxx_bottom": ("σ_x", "Bottom"),
+    "syy_top": ("σ_y", "Top"),
+    "syy_bottom": ("σ_y", "Bottom"),
+}
+
+
+def _run_global_stress_query(vtk_file: Path, aggregation: str) -> str:
+    """Query all 4 flexural stress fields for the given aggregation.
+
+    Runs AGG_SCRIPT for each of sxx_top, sxx_bottom, syy_top, syy_bottom,
+    collects all values, and returns a formatted markdown table with all 4 results
+    plus the overall winner (the field/surface producing the global max/min/mean).
+    """
+    agg_label = aggregation.upper()
+    field_results: Dict[str, Optional[float]] = {}
+
+    for field_name in _FLEXURAL_STRESS_FIELDS:
+        try:
+            payload = _run_script(AGG_SCRIPT, [
+                "--file", str(vtk_file),
+                "--field", field_name,
+                "--agg", aggregation,
+            ])
+            val = payload.get("value")
+            field_results[field_name] = float(val) if val is not None else None
+        except Exception:
+            field_results[field_name] = None
+
+    lines = [
+        f"### Global Stress Query — {agg_label}",
+        "",
+        "| Field | Surface | Value (MPa) |",
+        "|-------|---------|-------------|",
+    ]
+
+    best_field: Optional[str] = None
+    best_value: Optional[float] = None
+
+    for field_name in _FLEXURAL_STRESS_FIELDS:
+        label, surface = _GLOBAL_STRESS_LABELS[field_name]
+        val = field_results.get(field_name)
+        if val is not None:
+            lines.append(f"| {label} | {surface} | {val:.6g} |")
+            if best_value is None:
+                best_value = val
+                best_field = field_name
+            elif aggregation == "max" and val > best_value:
+                best_value = val
+                best_field = field_name
+            elif aggregation == "min" and val < best_value:
+                best_value = val
+                best_field = field_name
+            elif aggregation == "mean" and abs(val) > abs(best_value):
+                best_value = val
+                best_field = field_name
+        else:
+            lines.append(f"| {label} | {surface} | N/A |")
+
+    if best_field is not None and best_value is not None:
+        best_label, best_surface = _GLOBAL_STRESS_LABELS[best_field]
+        lines.append("")
+        lines.append(
+            f"**Overall {agg_label}:** {best_value:.6g} MPa "
+            f"at **{best_label}** ({best_surface} surface)"
+        )
+
+    return "\n".join(lines)
+
+
 def handle_vtk_lookup_command(
     user_input: str,
     *,
@@ -812,8 +929,7 @@ def handle_vtk_lookup_command(
     try:
         if intent.action == "flexural":
             args = ["--file", str(intent.vtk_file)]
-            if intent.with_plot:
-                args.append("--plot")
+            # Plots are always generated by the script; no --plot flag needed.
             payload = _run_script(FLEXURAL_SCRIPT, args)
             formatted = _format_flexural_response(payload, api_base_url=api_base_url)
             if can_narrate:
@@ -849,6 +965,24 @@ def handle_vtk_lookup_command(
             return formatted
 
         if intent.action == "aggregate":
+            # When the field was not explicitly specified and the query involves generic stress,
+            # run a global multi-field scan across all 4 flexural stress fields.
+            lowered_input = _normalize_text(user_input)
+            if not intent.field_explicit and any(t in lowered_input for t in _GENERIC_STRESS_TERMS):
+                formatted = _run_global_stress_query(intent.vtk_file, intent.aggregation or "max")
+                if can_narrate:
+                    narrated = _narrate_with_kimi(
+                        ollama_url=narration_url,
+                        model=narration_model,
+                        api_key=narration_api_key,
+                        user_question=user_input,
+                        structured_data=formatted,
+                        local_plot_paths=local_plots,
+                    )
+                    if narrated:
+                        return narrated
+                return formatted
+
             args = [
                 "--file", str(intent.vtk_file),
                 "--field", str(intent.field),

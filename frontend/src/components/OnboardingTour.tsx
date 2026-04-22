@@ -5,11 +5,11 @@ import { motion, AnimatePresence } from 'framer-motion'
 export const TOUR_STORAGE_KEY = 'pavement_tour_v1'
 
 export function shouldShowTour(): boolean {
-  return !localStorage.getItem(TOUR_STORAGE_KEY)
+  return !sessionStorage.getItem(TOUR_STORAGE_KEY)
 }
 
 export function markTourDone(): void {
-  localStorage.setItem(TOUR_STORAGE_KEY, '1')
+  sessionStorage.setItem(TOUR_STORAGE_KEY, '1')
 }
 
 interface TourStep {
@@ -22,7 +22,7 @@ interface TourStep {
   scrollTargetIntoView?: boolean
 }
 
-const STEPS: TourStep[] = [
+const ONBOARDING_STEPS: TourStep[] = [
   {
     tourId: 'params-panel',
     title: 'Configuration Panel',
@@ -56,6 +56,41 @@ const STEPS: TourStep[] = [
   },
 ]
 
+const EXPORT_STEPS: TourStep[] = [
+  {
+    tourId: 'enable-export',
+    title: 'Enable Export',
+    description:
+      'All parameters have been collected! Click this button to confirm your configuration and unlock the analysis and export tools below.',
+    tooltipSide: 'left',
+    centerTooltipVertically: true,
+  },
+  {
+    tourId: 'generate-analysis',
+    title: 'Generate Analysis',
+    description:
+      'Run the full finite element analysis using your configuration. This solves the pavement structural model and produces VTK result files ready for 3D visualization.',
+    tooltipSide: 'left',
+    centerTooltipVertically: true,
+  },
+  {
+    tourId: 'export-json',
+    title: 'Export Final JSON',
+    description:
+      'Download all parameters as a structured JSON file — perfect for archiving your design or re-running the same analysis later.',
+    tooltipSide: 'left',
+    centerTooltipVertically: true,
+  },
+  {
+    tourId: 'export-text',
+    title: 'Export Text Report',
+    description:
+      'Generate a human-readable summary of your parameters and results — ideal for reporting, review, or sharing with colleagues.',
+    tooltipSide: 'left',
+    centerTooltipVertically: true,
+  },
+]
+
 interface SpotRect {
   left: number
   top: number
@@ -67,12 +102,12 @@ const PADDING = 10
 const TOOLTIP_W = 296
 const TOOLTIP_GAP = 20
 
-export default function OnboardingTour({ onDone }: { onDone: () => void }) {
+function TourOverlay({ steps, onDone }: { steps: TourStep[]; onDone: () => void }) {
   const [step, setStep] = useState(0)
   const [spotRect, setSpotRect] = useState<SpotRect | null>(null)
   const [visible, setVisible] = useState(true)
 
-  const currentStep = STEPS[step]
+  const currentStep = steps[step]
 
   const measureElement = useCallback((tourId: string) => {
     const el = document.querySelector<HTMLElement>(`[data-tour="${tourId}"]`)
@@ -103,7 +138,6 @@ export default function OnboardingTour({ onDone }: { onDone: () => void }) {
   }, [currentStep.tourId, measureElement])
 
   const handleDone = useCallback(() => {
-    markTourDone()
     setVisible(false)
     setTimeout(() => onDone(), 280)
   }, [onDone])
@@ -112,19 +146,19 @@ export default function OnboardingTour({ onDone }: { onDone: () => void }) {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') handleDone()
       if (e.key === 'ArrowRight') {
-        setStep(s => (s < STEPS.length - 1 ? s + 1 : s))
-        if (step === STEPS.length - 1) handleDone()
+        setStep(s => (s < steps.length - 1 ? s + 1 : s))
+        if (step === steps.length - 1) handleDone()
       }
       if (e.key === 'ArrowLeft') setStep(s => Math.max(0, s - 1))
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [handleDone, step])
+  }, [handleDone, step, steps.length])
 
   const goNext = useCallback(() => {
-    if (step < STEPS.length - 1) setStep(s => s + 1)
+    if (step < steps.length - 1) setStep(s => s + 1)
     else handleDone()
-  }, [step, handleDone])
+  }, [step, steps.length, handleDone])
 
   const goPrev = useCallback(() => setStep(s => Math.max(0, s - 1)), [])
 
@@ -135,7 +169,6 @@ export default function OnboardingTour({ onDone }: { onDone: () => void }) {
   const sw = spotRect.width + PADDING * 2
   const sh = spotRect.height + PADDING * 2
 
-  // Tooltip horizontal placement
   let tooltipLeft: number
   if (currentStep.tooltipSide === 'left') {
     tooltipLeft = sl - TOOLTIP_W - TOOLTIP_GAP
@@ -144,12 +177,10 @@ export default function OnboardingTour({ onDone }: { onDone: () => void }) {
   }
   tooltipLeft = Math.max(12, Math.min(tooltipLeft, window.innerWidth - TOOLTIP_W - 12))
 
-  // Tooltip vertical placement
   const tooltipTop = currentStep.centerTooltipVertically
     ? Math.max(12, window.innerHeight / 2 - 130)
     : Math.max(12, Math.min(st + 8, window.innerHeight - 300))
 
-  // Scroll hint – bottom-centre of spotlight
   const scrollHintX = sl + sw / 2 - 16
   const scrollHintY = st + sh - 52
 
@@ -164,7 +195,7 @@ export default function OnboardingTour({ onDone }: { onDone: () => void }) {
           transition={{ duration: 0.28 }}
           style={{ position: 'fixed', inset: 0, zIndex: 9000, pointerEvents: 'none' }}
         >
-          {/* Modal backdrop – blocks all app interaction */}
+          {/* Modal backdrop */}
           <div
             style={{
               position: 'fixed',
@@ -176,7 +207,7 @@ export default function OnboardingTour({ onDone }: { onDone: () => void }) {
             onClick={(e) => e.stopPropagation()}
           />
 
-          {/* Spotlight – box-shadow creates dark overlay outside its bounds */}
+          {/* Spotlight */}
           <motion.div
             animate={{ left: sl, top: st, width: sw, height: sh }}
             transition={{ duration: 0.48, ease: [0.19, 1, 0.22, 1] }}
@@ -271,7 +302,7 @@ export default function OnboardingTour({ onDone }: { onDone: () => void }) {
                 }}
               >
                 <div style={{ display: 'flex', gap: 5, alignItems: 'center' }}>
-                  {STEPS.map((_, i) => (
+                  {steps.map((_, i) => (
                     <motion.div
                       key={i}
                       animate={{
@@ -322,13 +353,13 @@ export default function OnboardingTour({ onDone }: { onDone: () => void }) {
                     fontFamily: 'inherit',
                   }}
                 >
-                  {step + 1} / {STEPS.length}
+                  {step + 1} / {steps.length}
                 </span>
 
                 {step > 0 && <BackButton onClick={goPrev} />}
                 <NextButton
                   onClick={goNext}
-                  isLast={step === STEPS.length - 1}
+                  isLast={step === steps.length - 1}
                 />
               </div>
             </motion.div>
@@ -338,6 +369,18 @@ export default function OnboardingTour({ onDone }: { onDone: () => void }) {
     </AnimatePresence>,
     document.body,
   )
+}
+
+export default function OnboardingTour({ onDone }: { onDone: () => void }) {
+  const handleDone = useCallback(() => {
+    markTourDone()
+    onDone()
+  }, [onDone])
+  return <TourOverlay steps={ONBOARDING_STEPS} onDone={handleDone} />
+}
+
+export function ExportTour({ onDone }: { onDone: () => void }) {
+  return <TourOverlay steps={EXPORT_STEPS} onDone={onDone} />
 }
 
 // ── Small sub-components to keep button hover styles clean ──────────────────

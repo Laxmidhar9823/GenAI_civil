@@ -17,14 +17,14 @@ def main() -> int:
         description=(
             "Report flexural stresses (sigma_x, sigma_y) at top and bottom surfaces "
             "of a plate VTK result file. Outputs max, min, and mean for each "
-            "(2 stresses × 2 surfaces × 3 statistics = 12 values)."
+            "(2 stresses × 2 surfaces × 3 statistics = 12 values) plus contour plots."
         )
     )
     parser.add_argument("--file", required=True, help="Path to the VTK result file.")
     parser.add_argument(
         "--plot",
         action="store_true",
-        help="Generate contour plots (PNG) saved alongside the VTK file.",
+        help="Ignored — contour plots are always generated.",
     )
     parser.add_argument(
         "--output-dir",
@@ -37,9 +37,9 @@ def main() -> int:
     try:
         report = flexural_stress_analysis(args.file)
 
-        if args.plot:
-            saved_plots = plot_flexural_contours(args.file, output_dir=args.output_dir)
-            report["contour_plots"] = saved_plots
+        # Always generate contour plots for all 4 flexural stress fields and include paths.
+        saved_plots = plot_flexural_contours(args.file, output_dir=args.output_dir)
+        report["contour_plots"] = saved_plots
 
         if args.pretty:
             print(json.dumps(report, indent=2))

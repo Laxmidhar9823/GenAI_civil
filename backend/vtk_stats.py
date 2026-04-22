@@ -398,6 +398,146 @@ def describe_dataset(file_path: str) -> Dict[str, Any]:
     }
 
 
+_FLEXURAL_FIELDS = {
+    "sxx_top": ("sigma_x", "top"),
+    "syy_top": ("sigma_y", "top"),
+    "sxx_bottom": ("sigma_x", "bottom"),
+    "syy_bottom": ("sigma_y", "bottom"),
+}
+
+
+def flexural_stress_analysis(file_path: str) -> Dict[str, Any]:
+    """Return max, min, and mean for sigma_x and sigma_y at top and bottom surfaces."""
+    dataset = load_vtk_dataset(file_path)
+    point_data = dataset["point_data"]
+
+    results: Dict[str, Any] = {}
+    for field_name, (stress_label, surface) in _FLEXURAL_FIELDS.items():
+        if field_name not in point_data:
+            results[field_name] = {
+                "stress": stress_label,
+                "surface": surface,
+                "available": False,
+            }
+            continue
+
+        arr = np.asarray(point_data[field_name], dtype=float).ravel()
+        finite = arr[np.isfinite(arr)]
+
+        if finite.size == 0:
+            results[field_name] = {
+                "stress": stress_label,
+                "surface": surface,
+                "available": True,
+                "max": None,
+                "min": None,
+                "mean": None,
+                "sample_size": 0,
+            }
+        else:
+            results[field_name] = {
+                "stress": stress_label,
+                "surface": surface,
+                "available": True,
+                "max": float(np.max(finite)),
+                "min": float(np.min(finite)),
+                "mean": float(np.mean(finite)),
+                "sample_size": int(finite.size),
+            }
+
+    missing = [f for f, v in results.items() if not v.get("available", False)]
+    return {
+        "file": dataset["source"],
+        "source_format": dataset["source_format"],
+        "results": results,
+        "missing_fields": missing,
+    }
+
+
+def plot_flexural_contours(
+    file_path: str,
+    output_dir: Optional[str] = None,
+) -> List[str]:
+    """Generate contour plots for sigma_x and sigma_y at top and bottom surfaces.
+
+    Returns a list of saved PNG file paths.
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import matplotlib.tri as mtri
+
+    dataset = load_vtk_dataset(file_path)
+    points = np.asarray(dataset["points"], dtype=float)
+    x = points[:, 0]
+    y = points[:, 1]
+    point_data = dataset["point_data"]
+
+    if output_dir is None:
+        out_path = Path(dataset["source"]).parent
+    else:
+        out_path = Path(output_dir)
+
+    saved: List[str] = []
+
+    plot_specs = [
+        ("sxx_top", r"$\sigma_x$ — Top Surface", "sigma_x_top"),
+        ("sxx_bottom", r"$\sigma_x$ — Bottom Surface", "sigma_x_bottom"),
+        ("syy_top", r"$\sigma_y$ — Top Surface", "sigma_y_top"),
+        ("syy_bottom", r"$\sigma_y$ — Bottom Surface", "sigma_y_bottom"),
+    ]
+
+    triangulation = mtri.Triangulation(x, y)
+
+    for field_name, title, file_stem in plot_specs:
+        if field_name not in point_data:
+            continue
+
+        values = np.asarray(point_data[field_name], dtype=float).ravel()
+        if values.size != x.size:
+            continue
+
+        finite_mask = np.isfinite(values)
+        if not np.any(finite_mask):
+            continue
+
+        abs_max = float(np.max(np.abs(values[finite_mask])))
+        if abs_max == 0:
+            abs_max = 1.0
+
+        fig, ax = plt.subplots(figsize=(8, 6))
+        tcf = ax.tricontourf(
+            triangulation,
+            values,
+            levels=20,
+            cmap="RdBu_r",
+            vmin=-abs_max,
+            vmax=abs_max,
+        )
+        ax.tricontour(
+            triangulation,
+            values,
+            levels=10,
+            colors="k",
+            linewidths=0.3,
+            alpha=0.4,
+        )
+        cbar = fig.colorbar(tcf, ax=ax)
+        cbar.set_label("Stress (MPa)", fontsize=11)
+        ax.set_xlabel("x (mm)", fontsize=11)
+        ax.set_ylabel("y (mm)", fontsize=11)
+        ax.set_title(title, fontsize=13)
+        ax.set_aspect("equal")
+        fig.tight_layout()
+
+        png_path = out_path / f"{file_stem}.png"
+        fig.savefig(str(png_path), dpi=150)
+        plt.close(fig)
+        saved.append(str(png_path))
+
+    return saved
+
+
 def _normalize_key(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", (text or "").strip().lower())
 

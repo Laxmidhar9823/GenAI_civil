@@ -26,6 +26,7 @@ from backend.agent_logic import (
     format_value_with_unit,
     generate_completion_message,
     generate_autonomous_assistant_message,
+    generate_vtk_agent_response,
     generate_interactive_followup,
     generate_welcome_message,
     validate_single_param,
@@ -45,7 +46,7 @@ from backend.ollama import (
     resolve_model_match,
     suggest_available_models,
 )
-from backend.vtk_lookup_agent import handle_vtk_lookup_command
+from backend.vtk_lookup_agent import build_vtk_stats_summary, handle_vtk_lookup_command
 from backend.schemas import (
     ChatRequest,
     ChatResponse,
@@ -78,6 +79,8 @@ DEFAULT_CORS_ORIGINS = [
 APP_ENV = os.getenv("BACKEND_ENV", os.getenv("ENV", "production")).lower()
 IS_DEV = APP_ENV in {"dev", "development", "local"}
 REPO_ROOT = Path(__file__).resolve().parents[1]
+API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
+VTK_AGENT_MODEL = os.getenv("VTK_AGENT_MODEL", "kimi-k2.6:cloud")
 SOLVER_SCRIPT = REPO_ROOT / "DOF5_07.09.2025.py"
 FEM_KERNEL_SCRIPT = REPO_ROOT / "fem_local_Plate20_DOF5_07_09_2025.py"
 OUTPUT_DIR = REPO_ROOT / "output_python_square"
@@ -465,39 +468,11 @@ def chat(req: ChatRequest) -> ChatResponse:
     state.messages.append(Message(role="user", content=req.user_input))
 
     analysis_vtk = (state.analysis_vtk_file or "").strip() if state.analysis_generated else ""
-    lookup_response = handle_vtk_lookup_command(
-        req.user_input,
-        default_vtk_file=analysis_vtk or None,
-        allow_implicit=bool(analysis_vtk),
-    )
-    if lookup_response is not None:
-        if state.mode == "welcome":
-            state.mode = "free"
-
-        response = with_progress_tail(
-            lookup_response,
-            state.params,
-            state.current_asking,
-            include_progress=(state.mode != "complete"),
-        )
-        state.messages.append(Message(role="assistant", content=response))
-        _trim_messages(state)
-        final_params = build_final_configuration(state.params) if state.mode == "complete" else None
-        return ChatResponse(assistant_message=response, state=state, final_params=final_params)
-
-    # Build extraction context from recent conversation + collected params.
-    # This enables multi-turn, stateful assistance (values, corrections, and missing-info followups).
-    context = build_conversation_context(
-        [m.model_dump() for m in state.messages],
-        state.params,
-        state.memory,
-    )
-    lower_input = req.user_input.lower().strip()
 
     response = ""
     model_notice = ""
 
-    # Prepare LLM for both guided and free-form turns.
+    # Prepare LLM for both guided/free-form turns and agentic VTK routing.
     requested_model = req.llm_config.model
     api_key = (req.llm_config.api_key or "").strip() or None
     effective_model = requested_model
@@ -527,6 +502,55 @@ def chat(req: ChatRequest) -> ChatResponse:
         )
 
     llm = get_ollama_llm(req.llm_config.ollama_url, effective_model, api_key=api_key)
+
+    # Dedicated VTK agent model (primary) for tool routing and post-analysis QA.
+    # Deterministic parser remains as explicit fallback in the lookup handler.
+    vtk_llm = None
+    try:
+        vtk_llm = get_ollama_llm(req.llm_config.ollama_url, VTK_AGENT_MODEL, api_key=api_key)
+    except Exception:
+        vtk_llm = None
+
+    # For structured data queries (specific field lookups, flexural report), use the fast deterministic path.
+    # General/vague questions that don't match fall through to the LLM VTK agent below.
+    lookup_response = handle_vtk_lookup_command(
+        req.user_input,
+        default_vtk_file=analysis_vtk or None,
+        allow_implicit=bool(analysis_vtk),
+        api_base_url=API_BASE_URL,
+        llm=vtk_llm,
+        prefer_agentic=True,
+        available_plot_urls=state.analysis_plot_files,
+        narration_url=req.llm_config.ollama_url,
+        narration_model=VTK_AGENT_MODEL,
+        narration_api_key=api_key,
+    )
+    if lookup_response is not None:
+        if state.mode == "welcome":
+            state.mode = "free"
+
+        if model_notice:
+            lookup_response = f"{model_notice}\n\n{lookup_response}".strip()
+
+        response = with_progress_tail(
+            lookup_response,
+            state.params,
+            state.current_asking,
+            include_progress=(state.mode != "complete"),
+        )
+        state.messages.append(Message(role="assistant", content=response))
+        _trim_messages(state)
+        final_params = build_final_configuration(state.params) if state.mode == "complete" else None
+        return ChatResponse(assistant_message=response, state=state, final_params=final_params)
+
+    # Build extraction context from recent conversation + collected params.
+    # This enables multi-turn, stateful assistance (values, corrections, and missing-info followups).
+    context = build_conversation_context(
+        [m.model_dump() for m in state.messages],
+        state.params,
+        state.memory,
+    )
+    lower_input = req.user_input.lower().strip()
 
     if lower_input in ["let's begin", "lets begin", "start", "begin", "guide me", "help me"]:
         state.mode = "guided"
@@ -847,22 +871,41 @@ def chat(req: ChatRequest) -> ChatResponse:
                     "Please share any values you know, and I can capture several at once."
                 )
 
-            # Replace the mostly hard-coded assembly above with an autonomous LLM narration.
-            # If the LLM is unavailable, we keep the deterministic response as fallback.
-            response = generate_autonomous_assistant_message(
-                llm=llm,
-                memory=state.memory,
-                user_input=req.user_input,
-                mode=state.mode,
-                params=state.params,
-                applied_keys=applied,
-                inference_notes=inference_notes,
-                conversion_notes=conversion_notes,
-                problems=problems,
-                current_asking=state.current_asking,
-                conversation_only=conversation_only,
-                fallback_message=response,
-            )
+            # When analysis has been run and the message is conversational (no params applied,
+            # no problems), route to the VTK-aware LLM agent so it can answer any question
+            # about the results — including qualitative plot analysis and general questions.
+            _post_analysis_no_updates = not applied and not applied_load_cases and not problems
+            if state.analysis_generated and analysis_vtk and (conversation_only or _post_analysis_no_updates):
+                vtk_stats = build_vtk_stats_summary(analysis_vtk)
+                response = generate_vtk_agent_response(
+                    llm=vtk_llm,
+                    fallback_llm=llm,
+                    ollama_url=req.llm_config.ollama_url,
+                    model=VTK_AGENT_MODEL,
+                    api_key=api_key,
+                    user_input=req.user_input,
+                    vtk_stats_text=vtk_stats,
+                    slab_params=state.params,
+                    plot_files=state.analysis_plot_files,
+                    fallback_message=response,
+                )
+            else:
+                # Replace the mostly hard-coded assembly above with an autonomous LLM narration.
+                # If the LLM is unavailable, we keep the deterministic response as fallback.
+                response = generate_autonomous_assistant_message(
+                    llm=llm,
+                    memory=state.memory,
+                    user_input=req.user_input,
+                    mode=state.mode,
+                    params=state.params,
+                    applied_keys=applied,
+                    inference_notes=inference_notes,
+                    conversion_notes=conversion_notes,
+                    problems=problems,
+                    current_asking=state.current_asking,
+                    conversation_only=conversation_only,
+                    fallback_message=response,
+                )
 
     if model_notice:
         response = f"{model_notice}\n\n{response}".strip()

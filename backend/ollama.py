@@ -1,5 +1,7 @@
 import os
+import base64
 from difflib import get_close_matches
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import requests
@@ -138,3 +140,75 @@ def check_ollama_connection(
         return False, False, [], "Ollama returned an invalid JSON response."
     except requests.exceptions.RequestException as exc:
         return False, False, [], f"Ollama request failed: {exc}"
+
+
+def invoke_ollama_multimodal_chat(
+    *,
+    base_url: str,
+    model: str,
+    user_prompt: str,
+    system_prompt: Optional[str] = None,
+    image_paths: Optional[List[Path]] = None,
+    api_key: Optional[str] = None,
+    timeout_seconds: float = 30.0,
+) -> str:
+    """Call Ollama /api/chat directly with optional images for multimodal models.
+
+    `image_paths` are read and base64-encoded per Ollama API expectations.
+    Returns the assistant text content, or raises RuntimeError on malformed responses.
+    """
+    normalized_url = (base_url or "").strip().rstrip("/")
+    endpoint = f"{normalized_url}/api/chat"
+    headers = _build_auth_headers(api_key)
+
+    user_message: Dict[str, object] = {
+        "role": "user",
+        "content": user_prompt,
+    }
+
+    encoded_images: List[str] = []
+    for image_path in image_paths or []:
+        if not image_path or not image_path.exists() or not image_path.is_file():
+            continue
+        encoded_images.append(base64.b64encode(image_path.read_bytes()).decode("ascii"))
+
+    if encoded_images:
+        user_message["images"] = encoded_images
+
+    messages: List[Dict[str, object]] = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append(user_message)
+
+    payload = {
+        "model": model,
+        "stream": False,
+        "messages": messages,
+        "options": {
+            "temperature": 0.3,
+            "num_predict": 1000,
+        },
+    }
+
+    try:
+        response = requests.post(
+            endpoint,
+            json=payload,
+            timeout=timeout_seconds,
+            headers=headers or None,
+        )
+        response.raise_for_status()
+    except requests.exceptions.RequestException as exc:
+        raise RuntimeError(f"Ollama multimodal request failed: {exc}") from exc
+
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise RuntimeError("Ollama multimodal request returned invalid JSON.") from exc
+
+    message = data.get("message") if isinstance(data, dict) else None
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, str):
+        raise RuntimeError("Ollama multimodal response missing message content.")
+
+    return content

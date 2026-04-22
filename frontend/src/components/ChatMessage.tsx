@@ -1,5 +1,6 @@
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { API_BASE_URL } from '../lib/api'
 import type { ChatMessage as ChatMessageT } from '../lib/types'
 import { transformAssistantDisplayText } from '../lib/displayLabels'
 
@@ -20,6 +21,13 @@ const BotIcon = () => (
   </svg>
 )
 
+function resolveMarkdownImageSrc(src?: string): string | undefined {
+  if (!src) return src
+  if (/^https?:\/\//i.test(src) || src.startsWith('data:')) return src
+  if (src.startsWith('/')) return `${API_BASE_URL}${src}`
+  return `${API_BASE_URL}/${src}`
+}
+
 export default function ChatMessage({ msg }: { msg: ChatMessageT }) {
   const isUser = msg.role === 'user'
   const displayContent = isUser ? msg.content : transformAssistantDisplayText(msg.content)
@@ -35,7 +43,16 @@ export default function ChatMessage({ msg }: { msg: ChatMessageT }) {
           <div className="user-content">{msg.content}</div>
         ) : (
           <div className="markdown-content">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>{displayContent}</ReactMarkdown>
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm]}
+              components={{
+                img: ({ src, alt }) => (
+                  <img src={resolveMarkdownImageSrc(src)} alt={alt || 'plot'} loading="lazy" />
+                ),
+              }}
+            >
+              {displayContent}
+            </ReactMarkdown>
           </div>
         )}
       </div>

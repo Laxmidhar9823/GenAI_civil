@@ -637,27 +637,27 @@ def process_user_input_with_llm(
 
 def generate_welcome_message() -> str:
     """Generate a warm welcome message."""
-    return """# 👋 Hello! Welcome to the Pavement Configuration Assistant!
+    return """# Welcome to the Pavement Configuration Assistant
 
-I'm here to help you set up parameters for analyzing a concrete road pavement. Don't worry if you're not a technical expert - I'll explain everything in simple terms!
+This assistant helps you set up parameters for analyzing a concrete road pavement. You can answer in plain language; I’ll capture values and use suggested defaults when needed.
 
-### 🎯 What we're doing:
-We're going to configure a few settings for your concrete slab (the road surface). I'll ask you about:
-- **The size of the slab** (how big it is)
-- **The concrete properties** (how strong it is)  
-- **The ground underneath** (how supportive the soil is)
-- **Where the vehicle load is** (where tires press on the road)
+### What we’ll configure
+I’ll ask you about:
+- **Slab size** (length, width, thickness)
+- **Concrete properties**
+- **Subgrade/soil support**
+- **Load location** (where the vehicle load acts)
 
-### 💡 How this works:
-- I'll ask you one question at a time
-- For each question, I'll explain what it means in plain English
-- You can give me a value, or just say **"default"** to use the suggested value
-- If you know multiple values already, feel free to tell me all at once!
+### How it works
+- One question at a time
+- Brief explanation of what each parameter means
+- Reply with a value, or type **"default"** to accept the suggested value
+- If you know multiple values, you can provide them in one message
 
-### 📏 Base Units:
-Please enter values in these units.
+### Base units
+Please use the following units:
 - **Elastic Modulus (E):** MPa
-- **Poisson's Ratio (ν):** dimensionless (no unit)
+- **Poisson's Ratio (ν):** dimensionless
 - **Slab Length (a):** mm
 - **Slab Width (b):** mm
 - **Slab Thickness (t):** mm
@@ -668,9 +668,9 @@ Please enter values in these units.
 
 ---
 
-**Ready to start?** Just tell me about your pavement, or type **"let's begin"** and I'll guide you step by step! 
+**To begin:** describe your pavement, or type **"let's begin"** for guided setup.
 
-*Example: "I have a 4 meter square slab" or "let's begin"*
+*Example: "4 m square slab"*
 """
 
 

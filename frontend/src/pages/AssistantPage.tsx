@@ -340,11 +340,13 @@ export default function AssistantPage() {
         }
       })
 
-      // If export-ready final_params exists, patch its nodes too.
-      if (derivedNodes) {
-        setFinalParamsFromResponse((prevFinal) => {
-          if (!prevFinal || typeof prevFinal !== 'object') return prevFinal
-          const next = { ...prevFinal } as Record<string, unknown>
+      // Patch the cached export snapshot so it never goes stale after a panel edit.
+      setFinalParamsFromResponse((prevFinal) => {
+        if (!prevFinal || typeof prevFinal !== 'object') return prevFinal
+        const next = { ...prevFinal } as Record<string, unknown>
+
+        // Nodes (derived from mesh_type / a / b)
+        if (derivedNodes) {
           const nodesObj =
             next.nodes && typeof next.nodes === 'object' && !Array.isArray(next.nodes)
               ? ({ ...(next.nodes as Record<string, unknown>) } as Record<string, unknown>)
@@ -352,9 +354,44 @@ export default function AssistantPage() {
           nodesObj.x = derivedNodes.x
           nodesObj.y = derivedNodes.y
           next.nodes = nodesObj
-          return next
-        })
-      }
+        }
+
+        // Slab properties
+        if (k === 'Emod' || k === 'nu' || k === 't') {
+          const slabObj =
+            next.slab && typeof next.slab === 'object' && !Array.isArray(next.slab)
+              ? ({ ...(next.slab as Record<string, unknown>) } as Record<string, unknown>)
+              : ({} as Record<string, unknown>)
+          slabObj[k] = nextParams[k]
+          next.slab = slabObj
+        }
+
+        // Subgrade properties
+        if (k === 'Kx' || k === 'Ky' || k === 'Kz') {
+          const subgradeObj =
+            next.subgrade && typeof next.subgrade === 'object' && !Array.isArray(next.subgrade)
+              ? ({ ...(next.subgrade as Record<string, unknown>) } as Record<string, unknown>)
+              : ({} as Record<string, unknown>)
+          subgradeObj[k] = nextParams[k]
+          next.subgrade = subgradeObj
+        }
+
+        // Load patch coords / pressure — only patch when there is exactly one load case
+        // to avoid accidentally corrupting multi-case arrays that came from the backend.
+        if (k === 'x1' || k === 'x2' || k === 'y1' || k === 'y2' || k === 'q') {
+          const loadsObj =
+            next.loads && typeof next.loads === 'object' && !Array.isArray(next.loads)
+              ? ({ ...(next.loads as Record<string, unknown>) } as Record<string, unknown>)
+              : ({} as Record<string, unknown>)
+          const existingArr = loadsObj[k]
+          if (!Array.isArray(existingArr) || existingArr.length <= 1) {
+            loadsObj[k] = [nextParams[k]]
+            next.loads = loadsObj
+          }
+        }
+
+        return next
+      })
     },
     [state],
   )
@@ -378,25 +415,7 @@ export default function AssistantPage() {
         plotPath.startsWith('http') ? plotPath : `${API_BASE_URL}${plotPath.startsWith('/') ? plotPath : `/${plotPath}`}`,
       )
 
-      const chatLines: string[] = []
-      chatLines.push('### Analysis Complete')
-      chatLines.push(resp.message)
-      if (resp.vtk_file) chatLines.push(`- VTK file: ${resp.vtk_file}`)
-      if (resp.summary_file) chatLines.push(`- Summary file: ${resp.summary_file}`)
-      if (resp.results_file) chatLines.push(`- Results file: ${resp.results_file}`)
-
-      if (resolvedPlotUrls.length > 0) {
-        chatLines.push('')
-        chatLines.push('### Generated Plots')
-        for (let i = 0; i < resolvedPlotUrls.length; i++) {
-          const label = `Plot ${i + 1}`
-          chatLines.push(`![${label}](${resolvedPlotUrls[i]})`)
-        }
-      }
-
-      chatLines.push('')
-      chatLines.push('You can now ask follow-up questions about these results, for example: "max deflection", "mean sxx_top", or "show vtk fields".')
-      const assistantMessage = chatLines.join('\n')
+      const assistantMessage = 'Analysis complete. Ask me anything about your results.'
       const assistantStateMessage: ConversationState['messages'][number] = {
         role: 'assistant',
         content: assistantMessage,

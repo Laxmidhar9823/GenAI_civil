@@ -1,18 +1,27 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 import json
 import re
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 from typing import Dict, List, Optional
+
+from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_ollama import ChatOllama
+
+from backend.vtk_stats import describe_dataset
+from backend.ollama import invoke_ollama_multimodal_chat
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_VTK_FILE = REPO_ROOT / "output_python_square" / "results.vtk"
 DETAIL_SCRIPT = REPO_ROOT / "backend" / "scripts" / "vtk_detailed_report.py"
 AGG_SCRIPT = REPO_ROOT / "backend" / "scripts" / "vtk_aggregate_query.py"
+FLEXURAL_SCRIPT = REPO_ROOT / "backend" / "scripts" / "vtk_flexural_report.py"
 
 
 @dataclass
@@ -23,6 +32,7 @@ class LookupIntent:
     field: Optional[str] = None
     component: Optional[str] = None
     use_abs: bool = False
+    with_plot: bool = False
 
 
 _FIELD_ALIASES: Dict[str, List[str]] = {
@@ -83,6 +93,19 @@ _DETAIL_HINTS = (
     "show vtk info",
 )
 
+_FLEXURAL_HINTS = (
+    "flexural stress",
+    "bending stress",
+    "sigma_x",
+    "sigma_y",
+    "stress report",
+    "stress analysis",
+    "top surface stress",
+    "bottom surface stress",
+    "stress contour",
+    "contour plot",
+)
+
 _IMPLICIT_RESULT_HINTS = (
     "deflection",
     "displacement",
@@ -97,9 +120,75 @@ _IMPLICIT_RESULT_HINTS = (
     "graph",
 )
 
+_AGG_CANONICAL = {"mean", "max", "min", "sum", "std", "var", "median", "count", "p95", "p05"}
+
+_PLOT_REQUEST_HINTS = (
+    "show plot",
+    "show plots",
+    "generated plots",
+    "view plots",
+    "plot image",
+    "plot images",
+    "show contour",
+    "show contours",
+    "display plots",
+)
+
+# Questions asking for qualitative interpretation should bypass deterministic lookup
+# and be handled by the intelligent VTK agent (generate_vtk_agent_response).
+_QUALITATIVE_ANALYSIS_TERMS = frozenset({
+    "analyse", "analyze", "explain", "interpret", "inference", "infer",
+    "describe", "tell me about", "discuss", "insights", "what can you",
+    "observations", "understand", "give me insight", "give me inference",
+    "look at the", "examine", "what does it", "what do you see",
+    "what can we", "read the plot", "read the graph", "read the result",
+})
+
+_FIELD_LISTING_TERMS = frozenset({
+    "list fields", "list vtk", "what fields", "available fields",
+    "show fields", "vtk info", "vtk summary", "vtk details", "list all fields",
+})
+
 
 def _normalize_text(text: str) -> str:
     return " ".join((text or "").strip().lower().split())
+
+
+def _safe_parse_json_object(text: str) -> Optional[Dict]:
+    body = (text or "").strip()
+    if not body:
+        return None
+
+    if body.startswith("```"):
+        first_newline = body.find("\n")
+        if first_newline != -1:
+            body = body[first_newline + 1 :]
+        if body.endswith("```"):
+            body = body[:-3]
+        body = body.strip()
+
+    start = body.find("{")
+    end = body.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        body = body[start : end + 1]
+
+    try:
+        parsed = json.loads(body)
+    except json.JSONDecodeError:
+        return None
+
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _invoke_llm_with_timeout(llm: ChatOllama, messages: List, timeout_seconds: float = 10.0):
+    executor = ThreadPoolExecutor(max_workers=1)
+    try:
+        future = executor.submit(llm.invoke, messages)
+        return future.result(timeout=timeout_seconds)
+    except FuturesTimeoutError as exc:
+        raise TimeoutError(f"LLM request timed out after {timeout_seconds:.1f}s") from exc
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 def _extract_vtk_path(text: str, default_vtk_file: Optional[Path] = None) -> Path:
@@ -161,6 +250,22 @@ def _detect_field(text: str) -> Optional[str]:
     return None
 
 
+def _coerce_aggregation(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    normalized = _normalize_text(str(value))
+    if not normalized:
+        return None
+    if normalized in _AGG_CANONICAL:
+        return normalized
+    return _AGG_KEYWORDS.get(normalized)
+
+
+def _is_plot_request(text: str) -> bool:
+    lowered = _normalize_text(text)
+    return any(hint in lowered for hint in _PLOT_REQUEST_HINTS)
+
+
 def _is_lookup_intent(text: str, allow_implicit: bool = False) -> bool:
     lowered = _normalize_text(text)
     has_vtk_ref = (
@@ -183,6 +288,9 @@ def _is_lookup_intent(text: str, allow_implicit: bool = False) -> bool:
         return False
 
     if any(hint in lowered for hint in _DETAIL_HINTS):
+        return True
+
+    if any(hint in lowered for hint in _FLEXURAL_HINTS):
         return True
 
     if _detect_aggregation(lowered):
@@ -210,6 +318,10 @@ def _parse_intent(
     component = _detect_component(lowered)
     use_abs = "absolute" in lowered or "abs" in lowered
 
+    if any(hint in lowered for hint in _FLEXURAL_HINTS):
+        with_plot = "contour" in lowered or "plot" in lowered
+        return LookupIntent(action="flexural", vtk_file=vtk_file, with_plot=with_plot)
+
     if agg:
         if not field:
             # Sensible default when user asks generic aggregation on displacement/results.
@@ -223,7 +335,137 @@ def _parse_intent(
             use_abs=use_abs,
         )
 
+    if _is_plot_request(lowered):
+        return LookupIntent(action="plots", vtk_file=vtk_file)
+
     return LookupIntent(action="detail", vtk_file=vtk_file)
+
+
+def _build_planner_prompt(
+    *,
+    user_input: str,
+    vtk_file: Path,
+    allow_implicit: bool,
+) -> str:
+    available_fields: List[str] = []
+    if vtk_file.exists():
+        try:
+            info = describe_dataset(str(vtk_file))
+            available_fields = list(info.get("available_fields", {}).get("point_data", []) or [])
+        except Exception:
+            available_fields = []
+
+    if not available_fields:
+        available_fields = sorted(_FIELD_ALIASES.keys())
+
+    return (
+        "Classify and route the user query into one VTK action.\n"
+        "Return STRICT JSON with keys:\n"
+        "{\n"
+        '  "is_vtk_query": boolean,\n'
+        '  "action": "detail" | "aggregate" | "flexural" | "plots" | "none",\n'
+        '  "field": string | null,\n'
+        '  "aggregation": "mean"|"max"|"min"|"sum"|"std"|"var"|"median"|"count"|"p95"|"p05"|null,\n'
+        '  "component": "x"|"y"|"z"|"magnitude"|null,\n'
+        '  "use_abs": boolean,\n'
+        '  "with_plot": boolean\n'
+        "}\n\n"
+        "Routing rules:\n"
+        "- detail: asks what fields/summary/info/list.\n"
+        "- aggregate: asks numeric statistic (mean/max/min/etc.) over one field.\n"
+        "- flexural: asks bending/flexural/top/bottom stress report.\n"
+        "- plots: asks to show/view generated plots or contour images.\n"
+        "- none: unrelated to VTK results.\n"
+        "- For aggregate, if no field is explicit but user asks deflection/displacement, use field='w'.\n"
+        "- Prefer field names from AVAILABLE_FIELDS.\n"
+        "- If the message is unrelated and allow_implicit is false, choose none.\n\n"
+        f"allow_implicit={str(bool(allow_implicit)).lower()}\n"
+        f"vtk_file={vtk_file}\n"
+        f"AVAILABLE_FIELDS={', '.join(available_fields)}\n"
+        f"USER_QUERY={user_input}"
+    )
+
+
+def _parse_agentic_intent(
+    user_input: str,
+    *,
+    llm: Optional[ChatOllama],
+    default_vtk_file: Optional[Path],
+    allow_implicit: bool,
+) -> Optional[LookupIntent]:
+    if llm is None:
+        return None
+
+    vtk_file = _extract_vtk_path(user_input, default_vtk_file=default_vtk_file)
+    system = SystemMessage(
+        content=(
+            "You are a VTK tool router for pavement analysis. "
+            "Return JSON only. Never explain your reasoning."
+        )
+    )
+    human = HumanMessage(content=_build_planner_prompt(user_input=user_input, vtk_file=vtk_file, allow_implicit=allow_implicit))
+
+    try:
+        response = _invoke_llm_with_timeout(llm, [system, human], timeout_seconds=10.0)
+        content = str(getattr(response, "content", "") or "")
+        payload = _safe_parse_json_object(content)
+    except Exception:
+        return None
+
+    if not payload:
+        return None
+
+    if not bool(payload.get("is_vtk_query")):
+        return None
+
+    action = _normalize_text(str(payload.get("action") or "none"))
+    if action in {"", "none", "null"}:
+        return None
+
+    if action == "plots":
+        return LookupIntent(action="plots", vtk_file=vtk_file)
+
+    if action == "detail":
+        return LookupIntent(action="detail", vtk_file=vtk_file)
+
+    if action == "flexural":
+        with_plot = bool(payload.get("with_plot")) or _is_plot_request(user_input)
+        return LookupIntent(action="flexural", vtk_file=vtk_file, with_plot=with_plot)
+
+    if action == "aggregate":
+        requested_field = payload.get("field")
+        requested_component = payload.get("component")
+        requested_agg = payload.get("aggregation")
+
+        field = _detect_field(str(requested_field)) if requested_field else None
+        if not field:
+            field = _detect_field(user_input)
+        if not field:
+            field = "w"
+
+        aggregation = _coerce_aggregation(str(requested_agg) if requested_agg is not None else None)
+        if not aggregation:
+            aggregation = _detect_aggregation(user_input) or "mean"
+
+        component = None
+        if isinstance(requested_component, str):
+            normalized_component = _normalize_text(requested_component)
+            if normalized_component in {"x", "y", "z", "magnitude"}:
+                component = normalized_component
+        if component is None:
+            component = _detect_component(user_input)
+
+        use_abs = bool(payload.get("use_abs")) or ("absolute" in _normalize_text(user_input))
+        return LookupIntent(
+            action="aggregate",
+            vtk_file=vtk_file,
+            aggregation=aggregation,
+            field=field,
+            component=component,
+            use_abs=use_abs,
+        )
+
+    return None
 
 
 def _run_script(script_path: Path, args: List[str]) -> Dict:
@@ -250,16 +492,106 @@ def _run_script(script_path: Path, args: List[str]) -> Dict:
         raise RuntimeError("The VTK query script returned invalid JSON output.") from exc
 
 
+def build_vtk_stats_summary(vtk_file_path: str) -> str:
+    """Return a compact text summary of all fields in a VTK file for LLM context."""
+    try:
+        info = describe_dataset(vtk_file_path)
+    except Exception as exc:
+        return f"(Could not load VTK stats: {exc})"
+
+    lines = [
+        f"**Mesh:** {info.get('num_points', '?')} nodes, {info.get('num_cells', '?')} elements",
+        "",
+        "**Result fields:**",
+        "| Field | Min | Max | Mean |",
+        "|-------|-----|-----|------|",
+    ]
+
+    for field in info.get("point_data_fields", []):
+        name = field.get("name", "?")
+        stats = field.get("component_stats", [{}])[0]
+        mn = stats.get("min")
+        mx = stats.get("max")
+        me = stats.get("mean")
+
+        def _fmt(v):
+            return f"{v:.4g}" if v is not None else "N/A"
+
+        lines.append(f"| {name} | {_fmt(mn)} | {_fmt(mx)} | {_fmt(me)} |")
+
+    cell_fields = info.get("available_fields", {}).get("cell_data", [])
+    if cell_fields:
+        lines.append(f"\n**Cell fields:** {', '.join(cell_fields)}")
+
+    return "\n".join(lines)
+
+
+def _format_flexural_response(payload: Dict, api_base_url: str = "") -> str:
+    results = payload.get("results", {})
+    missing = payload.get("missing_fields", [])
+
+    lines = [
+        "### Flexural Stress Analysis",
+        "",
+        "| Field | Surface | Max (MPa) | Min (MPa) | Mean (MPa) |",
+        "|-------|---------|-----------|-----------|------------|",
+    ]
+
+    field_order = ["sxx_top", "sxx_bottom", "syy_top", "syy_bottom"]
+    labels = {
+        "sxx_top": "σ_x",
+        "sxx_bottom": "σ_x",
+        "syy_top": "σ_y",
+        "syy_bottom": "σ_y",
+    }
+
+    for field_name in field_order:
+        r = results.get(field_name)
+        if r is None:
+            continue
+        if not r.get("available", False):
+            lines.append(f"| {labels[field_name]} | {r['surface']} | N/A | N/A | N/A |")
+            continue
+        mx = f"{r['max']:.6g}" if r["max"] is not None else "N/A"
+        mn = f"{r['min']:.6g}" if r["min"] is not None else "N/A"
+        me = f"{r['mean']:.6g}" if r["mean"] is not None else "N/A"
+        lines.append(f"| {labels[field_name]} | {r['surface']} | {mx} | {mn} | {me} |")
+
+    if missing:
+        lines.append(f"\n> Missing fields: {', '.join(missing)}")
+
+    contour_plots = payload.get("contour_plots")
+    if contour_plots:
+        lines.append("\n**Stress Contour Plots:**")
+        for p in contour_plots:
+            basename = Path(p).name
+            url = f"{api_base_url}/artifacts/{basename}" if api_base_url else f"/artifacts/{basename}"
+            label = basename.replace("_", " ").replace(".png", "")
+            lines.append(f"![{label}]({url})")
+
+    return "\n".join(lines)
+
+
+def _format_plot_gallery(plot_urls: List[str]) -> str:
+    if not plot_urls:
+        return "No generated plots are available yet."
+
+    lines = [
+        "### Generated Analysis Plots",
+        "",
+    ]
+    for idx, url in enumerate(plot_urls, start=1):
+        lines.append(f"![Plot {idx}]({url})")
+    return "\n".join(lines)
+
+
 def _format_detail_response(payload: Dict) -> str:
     point_fields = payload.get("available_fields", {}).get("point_data", [])
     cell_fields = payload.get("available_fields", {}).get("cell_data", [])
 
     lines = [
-        "### VTK Detailed Report",
-        f"- File: {payload.get('file', 'unknown')}",
-        f"- Format: {payload.get('source_format', 'unknown')}",
-        f"- Points: {payload.get('num_points', 0)}",
-        f"- Cells: {payload.get('num_cells', 0)}",
+        "### Analysis Results Overview",
+        f"- Mesh: {payload.get('num_points', 0)} nodes, {payload.get('num_cells', 0)} elements",
     ]
 
     if point_fields:
@@ -283,17 +615,131 @@ def _format_aggregate_response(payload: Dict) -> str:
     else:
         value_text = str(value)
 
+    field = payload.get("resolved_field", payload.get("requested_field", "unknown"))
+    agg = payload.get("aggregation", "unknown")
+    component = payload.get("component", "scalar")
+    n = payload.get("sample_size", "unknown")
+
     lines = [
-        "### VTK Lookup Result",
-        f"- File: {payload.get('file', 'unknown')}",
-        f"- Field: {payload.get('resolved_field', payload.get('requested_field', 'unknown'))}",
-        f"- Location: {payload.get('location', 'unknown')}",
-        f"- Component: {payload.get('component', 'scalar')}",
-        f"- Aggregation: {payload.get('aggregation', 'unknown')}",
-        f"- Sample size: {payload.get('sample_size', 'unknown')}",
-        f"- Value: {value_text}",
+        "### Query Result",
+        f"- Field: **{field}**",
+        f"- Aggregation: {agg}",
+        f"- Component: {component}",
+        f"- Sample size: {n}",
+        f"- **Value: {value_text}**",
     ]
     return "\n".join(lines)
+
+
+_NARRATION_SYSTEM_PROMPT = (
+    "You are an expert rigid pavement analysis assistant. "
+    "Answer the user's question using the structured analysis result provided. "
+    "Be concise and engineering-focused. Use Markdown tables or bullet points where helpful. "
+    "Do not mention file paths or internal field names without context. "
+    "Do not output JSON. When plot images are attached, incorporate observations from them."
+)
+
+_NARRATION_TIMEOUT = 45.0
+
+
+def _resolve_plot_paths(plot_urls: List[str]) -> List[Path]:
+    """Resolve plot URL strings to local filesystem paths for multimodal input."""
+    artifacts_dir = REPO_ROOT / "output_python_square"
+    resolved: List[Path] = []
+    for raw in plot_urls or []:
+        text = (raw or "").strip()
+        if not text:
+            continue
+        candidate: Optional[Path] = None
+        if text.startswith("http://") or text.startswith("https://"):
+            parsed = urlparse(text)
+            basename = Path(parsed.path).name
+            if basename:
+                candidate = artifacts_dir / basename
+        elif text.startswith("/artifacts/"):
+            candidate = artifacts_dir / Path(text).name
+        else:
+            p = Path(text)
+            candidate = p if p.is_absolute() else (REPO_ROOT / p).resolve()
+        if candidate and candidate.exists() and candidate.is_file():
+            resolved.append(candidate)
+    seen: set = set()
+    unique: List[Path] = []
+    for p in resolved:
+        key = str(p)
+        if key not in seen:
+            seen.add(key)
+            unique.append(p)
+    return unique
+
+
+def _narrate_with_kimi(
+    *,
+    ollama_url: str,
+    model: str,
+    api_key: Optional[str],
+    user_question: str,
+    structured_data: str,
+    local_plot_paths: Optional[List[Path]] = None,
+    timeout: float = _NARRATION_TIMEOUT,
+) -> Optional[str]:
+    """Ask kimi to narrate a structured VTK result in natural engineering language."""
+    user_prompt = (
+        f"### USER QUESTION\n{user_question}\n\n"
+        f"### ANALYSIS RESULT\n{structured_data}\n\n"
+        "Provide a clear, professional engineering interpretation. "
+        "Quote the exact numeric values from the result."
+    )
+    try:
+        text = invoke_ollama_multimodal_chat(
+            base_url=ollama_url,
+            model=model,
+            system_prompt=_NARRATION_SYSTEM_PROMPT,
+            user_prompt=user_prompt,
+            image_paths=local_plot_paths or [],
+            api_key=api_key,
+            timeout_seconds=timeout,
+        )
+        cleaned = (text or "").strip()
+        return cleaned if cleaned else None
+    except Exception:
+        return None
+
+
+def _narrate_plots_with_kimi(
+    *,
+    ollama_url: str,
+    model: str,
+    api_key: Optional[str],
+    user_question: str,
+    local_plot_paths: List[Path],
+    plot_urls: List[str],
+    timeout: float = _NARRATION_TIMEOUT,
+) -> Optional[str]:
+    """Ask kimi to visually analyse all generated plots."""
+    if not local_plot_paths:
+        return None
+    plot_list = "\n".join(f"- {Path(u).name}" for u in plot_urls if u)
+    user_prompt = (
+        f"### USER QUESTION\n{user_question}\n\n"
+        f"### AVAILABLE PLOTS\n{plot_list}\n\n"
+        "The plots are attached as images. Provide a professional engineering analysis of "
+        "the contour patterns, stress distributions, and deflection fields shown."
+    )
+    try:
+        text = invoke_ollama_multimodal_chat(
+            base_url=ollama_url,
+            model=model,
+            system_prompt=_NARRATION_SYSTEM_PROMPT,
+            user_prompt=user_prompt,
+            image_paths=local_plot_paths,
+            api_key=api_key,
+            timeout_seconds=timeout,
+        )
+        cleaned = (text or "").strip()
+        return cleaned if cleaned else None
+    except Exception:
+        return None
 
 
 def handle_vtk_lookup_command(
@@ -301,47 +747,131 @@ def handle_vtk_lookup_command(
     *,
     default_vtk_file: Optional[str] = None,
     allow_implicit: bool = False,
+    api_base_url: str = "",
+    llm: Optional[ChatOllama] = None,
+    prefer_agentic: bool = False,
+    available_plot_urls: Optional[List[str]] = None,
+    narration_url: Optional[str] = None,
+    narration_model: Optional[str] = None,
+    narration_api_key: Optional[str] = None,
 ) -> Optional[str]:
     fallback_path = Path(default_vtk_file).resolve() if default_vtk_file else None
-    intent = _parse_intent(
-        user_input,
-        default_vtk_file=fallback_path,
-        allow_implicit=allow_implicit,
-    )
+    plot_urls = [url for url in (available_plot_urls or []) if isinstance(url, str) and url.strip()]
+
+    intent: Optional[LookupIntent] = None
+    if prefer_agentic and llm is not None:
+        intent = _parse_agentic_intent(
+            user_input,
+            llm=llm,
+            default_vtk_file=fallback_path,
+            allow_implicit=allow_implicit,
+        )
+
+    if intent is None:
+        intent = _parse_intent(
+            user_input,
+            default_vtk_file=fallback_path,
+            allow_implicit=allow_implicit,
+        )
+
     if intent is None:
         return None
 
+    # Qualitative questions (analysis, interpretation, inferences) should fall through
+    # to generate_vtk_agent_response rather than returning a deterministic field listing.
+    if intent.action == "detail":
+        lowered_input = _normalize_text(user_input)
+        has_qualitative = any(term in lowered_input for term in _QUALITATIVE_ANALYSIS_TERMS)
+        has_listing = any(term in lowered_input for term in _FIELD_LISTING_TERMS)
+        if has_qualitative and not has_listing:
+            return None
+
+    can_narrate = bool(narration_url and narration_model)
+    local_plots = _resolve_plot_paths(plot_urls) if can_narrate else []
+
+    if intent.action == "plots":
+        if can_narrate and local_plots:
+            narrated = _narrate_plots_with_kimi(
+                ollama_url=narration_url,
+                model=narration_model,
+                api_key=narration_api_key,
+                user_question=user_input,
+                local_plot_paths=local_plots,
+                plot_urls=plot_urls,
+            )
+            if narrated:
+                return narrated
+        return _format_plot_gallery(plot_urls)
+
     if not intent.vtk_file.exists():
         return (
-            "I could not find the VTK file for lookup. "
-            f"Expected: {intent.vtk_file}. "
-            "Run the solver first, or provide an explicit .vtk path in your message."
+            "The analysis results are not available yet. "
+            "Please run the analysis first."
         )
 
     try:
+        if intent.action == "flexural":
+            args = ["--file", str(intent.vtk_file)]
+            if intent.with_plot:
+                args.append("--plot")
+            payload = _run_script(FLEXURAL_SCRIPT, args)
+            formatted = _format_flexural_response(payload, api_base_url=api_base_url)
+            if can_narrate:
+                flexural_plots = _resolve_plot_paths(
+                    [f"{api_base_url}/artifacts/{Path(p).name}" for p in (payload.get("contour_plots") or [])]
+                ) + local_plots
+                narrated = _narrate_with_kimi(
+                    ollama_url=narration_url,
+                    model=narration_model,
+                    api_key=narration_api_key,
+                    user_question=user_input,
+                    structured_data=formatted,
+                    local_plot_paths=flexural_plots or local_plots,
+                )
+                if narrated:
+                    return narrated
+            return formatted
+
         if intent.action == "detail":
-            payload = _run_script(
-                DETAIL_SCRIPT,
-                ["--file", str(intent.vtk_file)],
-            )
-            return _format_detail_response(payload)
+            payload = _run_script(DETAIL_SCRIPT, ["--file", str(intent.vtk_file)])
+            formatted = _format_detail_response(payload)
+            if can_narrate:
+                narrated = _narrate_with_kimi(
+                    ollama_url=narration_url,
+                    model=narration_model,
+                    api_key=narration_api_key,
+                    user_question=user_input,
+                    structured_data=formatted,
+                    local_plot_paths=local_plots,
+                )
+                if narrated:
+                    return narrated
+            return formatted
 
         if intent.action == "aggregate":
             args = [
-                "--file",
-                str(intent.vtk_file),
-                "--field",
-                str(intent.field),
-                "--agg",
-                str(intent.aggregation),
+                "--file", str(intent.vtk_file),
+                "--field", str(intent.field),
+                "--agg", str(intent.aggregation),
             ]
             if intent.component:
                 args.extend(["--component", intent.component])
             if intent.use_abs:
                 args.append("--abs")
-
             payload = _run_script(AGG_SCRIPT, args)
-            return _format_aggregate_response(payload)
+            formatted = _format_aggregate_response(payload)
+            if can_narrate:
+                narrated = _narrate_with_kimi(
+                    ollama_url=narration_url,
+                    model=narration_model,
+                    api_key=narration_api_key,
+                    user_question=user_input,
+                    structured_data=formatted,
+                    local_plot_paths=local_plots,
+                )
+                if narrated:
+                    return narrated
+            return formatted
 
         return "I understood this as a VTK lookup request, but could not determine the action."
     except Exception as exc:

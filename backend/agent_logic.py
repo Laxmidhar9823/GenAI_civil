@@ -1,11 +1,16 @@
 import json
 import math
+import os
 import re
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_ollama import ChatOllama
+
+from backend.ollama import invoke_ollama_multimodal_chat
 
 DEFAULT_VALUES = {
     "Emod": 24000.0,
@@ -588,12 +593,16 @@ PARAM_CATEGORIES = {
 
 PARAM_ORDER = ["a", "b", "mesh_type", "t", "Emod", "nu", "Kx", "Ky", "Kz", "load_location", "q"]
 
-LLM_INVOKE_TIMEOUT_SECONDS = 8.0
-LLM_NARRATION_TIMEOUT_SECONDS = 18.0
+LLM_INVOKE_TIMEOUT_SECONDS = float(os.getenv("LLM_INVOKE_TIMEOUT_SECONDS", "45.0"))
+LLM_NARRATION_TIMEOUT_SECONDS = float(os.getenv("LLM_NARRATION_TIMEOUT_SECONDS", "25.0"))
 
 USE_ALL_DEFAULTS_PATTERNS = [
     "use defaults",
     "use all defaults",
+    "take all the default values for all the params",
+    "take all default values for all params",
+    "take all defaults",
+    "take defaults for all parameters",
     "defaults for remaining",
     "defaults for the rest",
     "use defaults for remaining",
@@ -1235,9 +1244,42 @@ def apply_implicit_inferences(params: Dict[str, Any], user_provided_keys: List[s
 
 
 def check_use_all_defaults_intent(user_input: str) -> bool:
-    lower_input = user_input.lower().strip()
+    lower_input = (user_input or "").lower().strip()
     compact = " ".join(lower_input.split())
-    return any(pattern in compact for pattern in USE_ALL_DEFAULTS_PATTERNS)
+    # Normalize punctuation so phrasing variants like
+    # "take all the default values for all the params" are caught consistently.
+    compact = re.sub(r"[^a-z0-9\s]", " ", compact)
+    compact = " ".join(compact.split())
+
+    if not compact:
+        return False
+
+    # Respect explicit negations such as "do not use defaults".
+    if re.search(r"\b(?:dont|do not|not|no|avoid|without)\b.{0,24}\bdefaults?\b", compact):
+        return False
+
+    if any(pattern in compact for pattern in USE_ALL_DEFAULTS_PATTERNS):
+        return True
+
+    # Heuristic catch-all for natural variants.
+    has_default = bool(re.search(r"\bdefaults?\b", compact))
+    has_action = any(token in compact for token in ["use", "take", "fill", "set", "apply", "keep", "go with"])
+    has_scope = any(
+        token in compact
+        for token in [
+            "all params",
+            "all the params",
+            "all parameters",
+            "all the parameters",
+            "all values",
+            "everything",
+            "remaining",
+            "the rest",
+            "rest of",
+        ]
+    )
+
+    return has_default and has_action and has_scope
 
 
 def convert_to_standard_unit(value: float, from_unit: str, param_key: str) -> Tuple[float, str]:
@@ -1319,8 +1361,8 @@ def validate_single_param(key: str, value: Any, all_params: Dict[str, Any]) -> T
         return False, "This value must be greater than zero."
     if key in ["Kx", "Ky", "Kz"] and value < 0:
         return False, "This value cannot be negative."
-    if key == "nu" and (value < 0 or value >= 0.5):
-        return False, "Poisson's ratio must be between 0 and 0.5 (physical limit for any material). For concrete pavements, 0.15–0.20 is typical."
+    if key == "nu" and (value < 0.15 or value > 0.25):
+        return False, "Poisson's ratio must be between 0.15 and 0.25 for concrete pavements (IS 456). Typical value is 0.15–0.20."
     if key == "x1" and "a" in all_params and value > all_params["a"]:
         return False, f"This can't be larger than your slab length ({all_params['a']} mm)."
     if key == "x2" and "a" in all_params and value > all_params["a"]:
@@ -2080,7 +2122,7 @@ def _progress_lines(params: Dict[str, Any], current_asking: Optional[str]) -> st
     next_key = current_asking if current_asking else next((k for k in PARAM_ORDER if k not in params), None)
 
     lines = [
-        "### 📊 Progress",
+        "### Progress",
         f"- Completed: **{done}/{total} ({pct}%)**",
         f"- Remaining: **{remaining}**",
     ]
@@ -2102,7 +2144,7 @@ def _progress_lines(params: Dict[str, Any], current_asking: Optional[str]) -> st
 def with_progress_tail(message: str, params: Dict[str, Any], current_asking: Optional[str], include_progress: bool = True) -> str:
     if not include_progress:
         return message
-    if "### 📊 Progress" in message:
+    if "### Progress" in message:
         return message
     return f"{message.rstrip()}\n\n---\n\n{_progress_lines(params, current_asking)}\n\n---"
 
@@ -2273,10 +2315,14 @@ def _invoke_llm_with_timeout(llm: ChatOllama, messages: List, timeout_seconds: f
     executor = ThreadPoolExecutor(max_workers=1)
     future = executor.submit(llm.invoke, messages)
     try:
-        return future.result(timeout=timeout_seconds)
+        timeout = float(timeout_seconds)
+        if timeout <= 0:
+            # Optional "no-timeout" mode for long cloud inference runs.
+            return future.result()
+        return future.result(timeout=timeout)
     except FuturesTimeoutError as exc:
         future.cancel()
-        raise TimeoutError(f"LLM request timed out after {timeout_seconds:.1f}s") from exc
+        raise TimeoutError(f"LLM request timed out after {timeout:.1f}s") from exc
     finally:
         executor.shutdown(wait=False, cancel_futures=True)
 
@@ -2590,28 +2636,28 @@ def process_user_input_with_llm(
 
 def generate_welcome_message() -> str:
     """Generate a warm welcome message."""
-    return """# 👋 Hello! Welcome to the Pavement Configuration Assistant!
+    return """# Welcome to the Pavement Configuration Assistant
 
-I'm here to help you set up parameters for analyzing a concrete road pavement. Don't worry if you're not a technical expert - I'll explain everything in simple terms!
+This assistant helps you set up parameters for analyzing a concrete road pavement. You can answer in plain language; I’ll capture values and use safe defaults when needed.
 
-### 🎯 What we're doing:
-We're going to configure a few settings for your concrete slab (the road surface). I'll ask you about:
-- **The size of the slab** (how big it is)
-- **The mesh density** (coarse / medium / fine)
-- **The concrete properties** (how strong it is)  
-- **The ground underneath** (how supportive the soil is)
-- **Where the load acts** (corner / edge / interior)
+### What we’ll configure
+I’ll ask you about:
+- **Slab size** (length, width, thickness)
+- **Mesh density** (coarse / medium / fine)
+- **Concrete properties**
+- **Subgrade/soil support**
+- **Load location** (corner / edge / interior)
 
-### 💡 How this works:
-- I'll ask you one question at a time
-- For each question, I'll explain what it means in plain English
-- You can give me a value, or just say **\"default\"** to use the suggested value
-- If you know multiple values already, feel free to tell me all at once!
+### How it works
+- One question at a time
+- Brief explanation of what each parameter means
+- Reply with a value, or type **"default"** to accept the suggested value
+- If you know multiple values, you can provide them in one message
 
-### 📏 Base Units:
-Please enter values in these units.
+### Base units
+Please use the following units:
 - **Elastic Modulus (E):** MPa
-- **Poisson's Ratio (ν):** dimensionless (no unit)
+- **Poisson's Ratio (ν):** dimensionless
 - **Slab Length (a):** mm
 - **Slab Width (b):** mm
 - **Slab Thickness (t):** mm
@@ -2622,13 +2668,13 @@ Please enter values in these units.
 
 ---
 
-**Ready to start?** Just tell me about your pavement, or type **\"let's begin\"** and I'll guide you step by step! 
+**To begin:** describe your pavement, or type **"let's begin"** for guided setup.
 
-*Example: \"I have a 4 meter square slab, medium mesh, load at edge\" or \"let's begin\"*
+*Example: "4 m square slab, medium mesh, load at edge"*
 
 ---
 
-### 📊 Progress
+### Progress
 - Completed: **0/11 (0%)**
 - Remaining: **11**
 - Next focus: **Slab Length**
@@ -2823,7 +2869,16 @@ def create_autonomous_response_system_prompt() -> str:
         "explain the computation briefly in plain language.\n"
         "- If something is missing or ambiguous, ask ONE focused follow-up question.\n"
         "- If there are validation or feasibility issues, address them before moving on.\n"
-        "- Keep responses warm, concise, and practical. Use Markdown sparingly.\n"
+        "- Keep responses warm, concise, and practical. Use Markdown sparingly.\n\n"
+        "PANEL AWARENESS:\n"
+        "- You have full read access to the user's right-side configuration panel. "
+        "All collected values are listed under CONFIRMED PARAMETERS in every prompt.\n"
+        "- If a user asks 'what have I set?', 'what is my current config?', or 'what's left?', "
+        "answer directly from CONFIRMED PARAMETERS and MISSING REQUIRED INPUTS.\n"
+        "- You can update any parameter at any time — even after configuration is complete. "
+        "Simply acknowledge the new value; the change will be applied automatically.\n"
+        "- After applying an edit in complete mode, confirm the specific change and remind the user "
+        "to re-run analysis if prior results already exist.\n"
     )
 
 
@@ -2892,7 +2947,12 @@ def create_autonomous_response_prompt(
         "4. If something is ambiguous (contact area given but no load location, or load given but no contact dims), "
         "ask ONE focused clarification question.\n"
         "5. If not complete and no issues, ask ONE focused question for the most important missing input.\n"
-        "6. If complete, confirm all inputs are ready and tell the user to review or export from the side panel.\n\n"
+        "6. If complete:\n"
+        "   a. If UPDATES CAPTURED THIS TURN is non-empty → confirm the specific change(s) by name and value, "
+        "and note that any prior analysis results should be re-run with the updated inputs.\n"
+        "   b. If the user asked about current values or what has been set → summarise the relevant "
+        "CONFIRMED PARAMETERS clearly in plain language.\n"
+        "   c. Otherwise → confirm all inputs are ready and direct the user to the side panel to run or export analysis.\n\n"
         "PROACTIVE BEHAVIOURS (apply where relevant, don't overdo):\n"
         "- If user provided load (kN) but no contact dims → ask for tyre contact dimensions.\n"
         "- If user gave concrete grade → confirm the computed E value from IS 456.\n"
@@ -2902,6 +2962,198 @@ def create_autonomous_response_prompt(
     )
 
     return "".join(segments)
+
+
+def create_vtk_analysis_system_prompt() -> str:
+    return (
+        "You are an expert rigid pavement analysis assistant. "
+        "The user has just completed a Finite Element Analysis of their concrete pavement slab.\n\n"
+        "You have full access to the analysis results provided in the prompt under VTK ANALYSIS RESULTS. "
+        "Use them to answer any question the user has about the simulation outcome.\n\n"
+        "GUIDELINES:\n"
+        "- When answering questions about the analysis: cite only values present in VTK ANALYSIS RESULTS "
+        "or SLAB CONFIGURATION, and include field names with engineering units.\n"
+        "- If the user asks about a result field that is not listed, say it was not available in the output.\n"
+        "- When plot images are attached or listed under GENERATED PLOTS, visually analyse them and "
+        "embed them in your response using Markdown image syntax: ![description](url).\n"
+        "- Keep answers concise and engineering-focused. Use Markdown tables or bullets where helpful.\n"
+        "- If the user wants to change a configuration parameter, acknowledge the request and let them "
+        "know the side panel or chat can be used to update values and re-run analysis.\n"
+        "- If the user asks a general question unrelated to this analysis, answer it briefly and "
+        "naturally — you are a helpful assistant, not just a report reader.\n"
+    )
+
+
+def _render_slab_params_for_vtk(params: Dict[str, Any]) -> str:
+    labels = {
+        "Emod": ("Elastic Modulus (E)", "MPa"),
+        "nu": ("Poisson's Ratio", ""),
+        "t": ("Slab Thickness", "mm"),
+        "Kx": ("Subgrade Kx", ""),
+        "Ky": ("Subgrade Ky", ""),
+        "Kz": ("Subgrade Kz", ""),
+        "a": ("Slab Length", "mm"),
+        "b": ("Slab Width", "mm"),
+        "q": ("Load Pressure", "MPa"),
+        "load_location": ("Load Location", ""),
+        "mesh_type": ("Mesh Type", ""),
+    }
+    lines = []
+    for key, (label, unit) in labels.items():
+        val = params.get(key)
+        if val is not None:
+            lines.append(f"- {label}: {val} {unit}".rstrip())
+    return "\n".join(lines) if lines else "(no configuration data)"
+
+
+def _resolve_local_plot_paths(plot_files: List[str]) -> List[Path]:
+    """Resolve frontend/backend plot references to local artifact files.
+
+    Supports values like:
+    - /artifacts/plot.png
+    - http://localhost:8000/artifacts/plot.png
+    - absolute filesystem paths
+    """
+    repo_root = Path(__file__).resolve().parents[1]
+    artifacts_dir = repo_root / "output_python_square"
+    resolved: List[Path] = []
+
+    for raw in plot_files or []:
+        text = (raw or "").strip()
+        if not text:
+            continue
+
+        candidate: Optional[Path] = None
+
+        if text.startswith("http://") or text.startswith("https://"):
+            parsed = urlparse(text)
+            basename = Path(parsed.path).name
+            if basename:
+                candidate = artifacts_dir / basename
+        elif text.startswith("/artifacts/"):
+            basename = Path(text).name
+            if basename:
+                candidate = artifacts_dir / basename
+        else:
+            p = Path(text)
+            if p.is_absolute():
+                candidate = p
+            else:
+                candidate = (repo_root / p).resolve()
+
+        if candidate and candidate.exists() and candidate.is_file():
+            resolved.append(candidate)
+
+    # Preserve order while removing duplicates.
+    unique: List[Path] = []
+    seen = set()
+    for path in resolved:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(path)
+    return unique
+
+
+def generate_vtk_agent_response(
+    *,
+    llm: Optional[ChatOllama],
+    fallback_llm: Optional[ChatOllama] = None,
+    ollama_url: Optional[str],
+    model: Optional[str],
+    api_key: Optional[str],
+    user_input: str,
+    vtk_stats_text: str,
+    slab_params: Dict[str, Any],
+    plot_files: List[str],
+    fallback_message: str = "",
+    timeout_seconds: float = LLM_NARRATION_TIMEOUT_SECONDS,
+) -> str:
+    """Use the LLM to answer a post-analysis question with full VTK context.
+
+    Tries in priority order:
+    1. kimi multimodal (ollama_url + model + images)
+    2. kimi text-only (llm)
+    3. user's local model (fallback_llm)
+    """
+    if llm is None and not (ollama_url and model) and fallback_llm is None:
+        return fallback_message
+
+    plots_section = ""
+    if plot_files:
+        plot_lines = [f"![Plot {i+1}]({url})" for i, url in enumerate(plot_files)]
+        plots_section = "\n\n### GENERATED PLOTS\n" + "\n".join(plot_lines)
+
+    prompt = (
+        f"### USER QUESTION\n{user_input}\n\n"
+        f"### SLAB CONFIGURATION\n{_render_slab_params_for_vtk(slab_params)}\n\n"
+        f"### VTK ANALYSIS RESULTS\n{vtk_stats_text}"
+        f"{plots_section}\n\n"
+        "### TASK\n"
+        "Answer the user's question using the data above. "
+        "If plots are listed and relevant, embed them inline with the Markdown image syntax already provided. "
+        "Be concise and engineering-focused. Do not output JSON."
+    )
+
+    system_prompt_text = create_vtk_analysis_system_prompt()
+
+    def _try_chat_llm(chat_llm: ChatOllama) -> Optional[str]:
+        system = SystemMessage(content=system_prompt_text)
+        human = HumanMessage(content=prompt)
+        resp = _invoke_llm_with_timeout(chat_llm, [system, human], timeout_seconds=timeout_seconds)
+        if resp and getattr(resp, "content", None):
+            return _clean_llm_text(str(resp.content)) or None
+        return None
+
+    # 1. Primary: kimi multimodal — sends plot images so the model can visually inspect them.
+    local_plot_paths = []
+    try:
+        local_plot_paths = _resolve_local_plot_paths(plot_files)
+    except Exception:
+        pass
+
+    if ollama_url and model and local_plot_paths:
+        try:
+            multimodal_text = invoke_ollama_multimodal_chat(
+                base_url=ollama_url,
+                model=model,
+                system_prompt=system_prompt_text,
+                user_prompt=prompt,
+                image_paths=local_plot_paths,
+                api_key=api_key,
+                timeout_seconds=timeout_seconds,
+            )
+            cleaned_multi = _clean_llm_text(multimodal_text)
+            if cleaned_multi:
+                return cleaned_multi
+        except Exception:
+            pass
+
+    # 2. Secondary: kimi text-only (no images).
+    if llm is not None:
+        try:
+            result = _try_chat_llm(llm)
+            if result:
+                return result
+        except Exception as exc:
+            err_text = str(exc).strip().lower()
+            if ("unauthorized" in err_text or "401" in err_text) and fallback_llm is None:
+                return (
+                    "Couldn't query the model (401 Unauthorized). "
+                    "Add an API key in Settings or switch to a local model.\n\n" + fallback_message
+                )
+
+    # 3. Tertiary: user's configured local model.
+    if fallback_llm is not None:
+        try:
+            result = _try_chat_llm(fallback_llm)
+            if result:
+                return result
+        except Exception:
+            pass
+
+    return fallback_message
 
 
 def generate_autonomous_assistant_message(

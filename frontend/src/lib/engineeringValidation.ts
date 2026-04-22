@@ -132,8 +132,8 @@ export function validateInlineEngineeringEdit(args: {
     if (nu === null) {
       return { ok: false, normalizedValue, error: 'Enter a numeric value.' }
     }
-    if (nu < 0.15 || nu > 0.2) {
-      return { ok: false, normalizedValue, error: "Poisson's ratio must be between 0.15 and 0.2." }
+    if (nu < 0.15 || nu > 0.25) {
+      return { ok: false, normalizedValue, error: "Poisson's ratio must be between 0.15 and 0.25 (IS 456)." }
     }
     return { ok: true, normalizedValue: String(nu) }
   }

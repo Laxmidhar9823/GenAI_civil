@@ -2613,7 +2613,7 @@ def process_user_input_with_llm(
             }
 
     try:
-        system_message = SystemMessage(content=create_conversational_system_prompt())
+        system_message = SystemMessage(content=create_expert_system_prompt())
         extraction_prompt = create_extraction_prompt(user_input, context, current_asking)
         human_message = HumanMessage(content=extraction_prompt)
 

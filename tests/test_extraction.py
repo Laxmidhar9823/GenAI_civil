@@ -1,7 +1,7 @@
 # tests/test_extraction.py
 import json
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 from backend.agent_logic import (
     create_expert_system_prompt,
     create_extraction_prompt,
@@ -164,7 +164,7 @@ class TestProcessUserInputWithLLM:
 
     def test_timeout_returns_friendly_fallback(self):
         mock_llm = MagicMock()
-        mock_llm.invoke.side_effect = Exception("connection timeout")
+        mock_llm.invoke.side_effect = TimeoutError("connection timeout")
         result = process_user_input_with_llm("test", mock_llm, "", {}, None)
         assert result["needs_clarification"] is True
         assert "friendly_response" in result

@@ -36,153 +36,6 @@ class LookupIntent:
     field_explicit: bool = True  # False when field was a fallback default, not user-specified
 
 
-_FIELD_ALIASES: Dict[str, List[str]] = {
-    "w": ["w", "deflection", "vertical displacement", "vertical deflection", "out of plane displacement"],
-    "u": ["u", "x displacement", "displacement x", "longitudinal displacement"],
-    "v": ["v", "y displacement", "displacement y", "transverse displacement"],
-    "theta_x": ["theta_x", "rotation x", "rotation about y", "slope x"],
-    "theta_y": ["theta_y", "rotation y", "rotation about x", "slope y"],
-    "sxx_top": ["sxx top", "sigma xx top", "top sigma xx", "top sxx", "top normal stress x"],
-    "syy_top": ["syy top", "sigma yy top", "top sigma yy", "top syy"],
-    "sxy_top": ["sxy top", "tau xy top", "top shear stress", "top sxy"],
-    "sxx_bottom": ["sxx bottom", "sigma xx bottom", "bottom sigma xx", "bottom sxx", "sxx bot"],
-    "syy_bottom": ["syy bottom", "sigma yy bottom", "bottom sigma yy", "bottom syy", "syy bot"],
-    "sxy_bottom": ["sxy bottom", "tau xy bottom", "bottom shear stress", "bottom sxy", "sxy bot"],
-    "sxx_membrane": ["sxx membrane", "sigma xx membrane", "midplane sigma xx", "membrane sxx"],
-    "syy_membrane": ["syy membrane", "sigma yy membrane", "midplane sigma yy", "membrane syy"],
-    "sxy_membrane": ["sxy membrane", "tau xy membrane", "midplane shear stress", "membrane sxy"],
-    "displacement": ["displacement vector", "vector displacement", "displacement"],
-}
-
-_AGG_KEYWORDS: Dict[str, str] = {
-    "average": "mean",
-    "avg": "mean",
-    "mean": "mean",
-    "maximum": "max",
-    "highest": "max",
-    "peak": "max",
-    "max": "max",
-    "minimum": "min",
-    "lowest": "min",
-    "min": "min",
-    "sum": "sum",
-    "total": "sum",
-    "std": "std",
-    "stdev": "std",
-    "standard deviation": "std",
-    "variance": "var",
-    "var": "var",
-    "median": "median",
-    "count": "count",
-    "p95": "p95",
-    "95 percentile": "p95",
-    "percentile 95": "p95",
-    "p05": "p05",
-    "p5": "p05",
-    "5 percentile": "p05",
-    "percentile 5": "p05",
-}
-
-_DETAIL_HINTS = (
-    "analyze vtk",
-    "analyse vtk",
-    "inspect vtk",
-    "vtk details",
-    "vtk summary",
-    "list vtk fields",
-    "what fields",
-    "show vtk info",
-)
-
-_FLEXURAL_HINTS = (
-    "flexural stress",
-    "bending stress",
-    "sigma_x",
-    "sigma_y",
-    "stress report",
-    "stress analysis",
-    "top surface stress",
-    "bottom surface stress",
-    "stress contour",
-    "contour plot",
-)
-
-_IMPLICIT_RESULT_HINTS = (
-    "deflection",
-    "displacement",
-    "rotation",
-    "stress",
-    "sxx",
-    "syy",
-    "sxy",
-    "result",
-    "field",
-    "plot",
-    "graph",
-)
-
-_AGG_CANONICAL = {"mean", "max", "min", "sum", "std", "var", "median", "count", "p95", "p05"}
-
-_PLOT_REQUEST_HINTS = (
-    "show plot",
-    "show plots",
-    "generated plots",
-    "view plots",
-    "plot image",
-    "plot images",
-    "show contour",
-    "show contours",
-    "display plots",
-)
-
-# Generic stress terms that indicate a cross-field scan is needed instead of a single-field aggregate.
-_GENERIC_STRESS_TERMS = frozenset({"stress", "sigma"})
-
-# The four primary flexural stress fields reported across surfaces.
-_FLEXURAL_STRESS_FIELDS: List[str] = ["sxx_top", "sxx_bottom", "syy_top", "syy_bottom"]
-
-# Questions asking for qualitative interpretation should bypass deterministic lookup
-# and be handled by the intelligent VTK agent (generate_vtk_agent_response).
-_QUALITATIVE_ANALYSIS_TERMS = frozenset({
-    "analyse", "analyze", "explain", "interpret", "inference", "infer",
-    "describe", "tell me about", "discuss", "insights", "what can you",
-    "observations", "understand", "give me insight", "give me inference",
-    "look at the", "examine", "what does it", "what do you see",
-    "what can we", "read the plot", "read the graph", "read the result",
-})
-
-_FIELD_LISTING_TERMS = frozenset({
-    "list fields", "list vtk", "what fields", "available fields",
-    "show fields", "vtk info", "vtk summary", "vtk details", "list all fields",
-})
-
-
-def _normalize_text(text: str) -> str:
-    return " ".join((text or "").strip().lower().split())
-
-
-def _default_aggregate_field_for_query(text: str, detected_field: Optional[str]) -> Optional[str]:
-    """Return the appropriate default field for an aggregate query.
-
-    Returns None when generic stress is detected without a specific stress field,
-    signalling the caller to route to flexural (multi-field scan) instead of a
-    single-field aggregate.  Returns 'w' when no field and no stress context are found.
-
-    Priority order:
-    1. If stress terms present and detected_field is None or the weak 'w' default → None.
-    2. If a specific non-'w' field was detected → return it.
-    3. Fall back to 'w' (deflection default).
-    """
-    lowered = _normalize_text(text)
-    if any(term in lowered for term in _GENERIC_STRESS_TERMS):
-        # Return None unless the user named an explicit stress field (not the 'w' default).
-        if detected_field is None or detected_field == "w":
-            return None
-    if detected_field is not None:
-        return detected_field
-    return "w"
-
-
 def _safe_parse_json_object(text: str) -> Optional[Dict]:
     body = (text or "").strip()
     if not body:
@@ -234,150 +87,6 @@ def _extract_vtk_path(text: str, default_vtk_file: Optional[Path] = None) -> Pat
     return DEFAULT_VTK_FILE.resolve()
 
 
-def _detect_aggregation(text: str) -> Optional[str]:
-    lowered = _normalize_text(text)
-    for keyword, agg in _AGG_KEYWORDS.items():
-        if keyword in lowered:
-            return agg
-    return None
-
-
-def _detect_component(text: str) -> Optional[str]:
-    lowered = _normalize_text(text)
-    if "magnitude" in lowered or "norm" in lowered:
-        return "magnitude"
-    if re.search(r"\bcomponent\s*0\b|\bx\s*component\b", lowered):
-        return "x"
-    if re.search(r"\bcomponent\s*1\b|\by\s*component\b", lowered):
-        return "y"
-    if re.search(r"\bcomponent\s*2\b|\bz\s*component\b", lowered):
-        return "z"
-    if re.search(r"\bx\b", lowered) and "displacement" in lowered:
-        return "x"
-    if re.search(r"\by\b", lowered) and "displacement" in lowered:
-        return "y"
-    if re.search(r"\bz\b", lowered) and "displacement" in lowered:
-        return "z"
-    return None
-
-
-def _detect_field(text: str) -> Optional[str]:
-    lowered = _normalize_text(text)
-
-    # Prefer exact known aliases.
-    # Single-character aliases (e.g. "w", "u", "v") must be whole-word matches to avoid
-    # false positives like "w" matching inside "what" or "u" inside "output".
-    for canonical, aliases in _FIELD_ALIASES.items():
-        for alias in aliases:
-            if len(alias) == 1:
-                if re.search(r"\b" + re.escape(alias) + r"\b", lowered):
-                    return canonical
-            elif alias in lowered:
-                return canonical
-
-    # If user gave an explicit solver-style field token, preserve it.
-    explicit = re.search(r"\b([a-z]+_[a-z]+|[usvwt]{1}|sxx|syy|sxy)\b", lowered)
-    if explicit:
-        token = explicit.group(1)
-        return token
-
-    return None
-
-
-def _coerce_aggregation(value: Optional[str]) -> Optional[str]:
-    if value is None:
-        return None
-    normalized = _normalize_text(str(value))
-    if not normalized:
-        return None
-    if normalized in _AGG_CANONICAL:
-        return normalized
-    return _AGG_KEYWORDS.get(normalized)
-
-
-def _is_plot_request(text: str) -> bool:
-    lowered = _normalize_text(text)
-    return any(hint in lowered for hint in _PLOT_REQUEST_HINTS)
-
-
-def _is_lookup_intent(text: str, allow_implicit: bool = False) -> bool:
-    lowered = _normalize_text(text)
-    has_vtk_ref = (
-        "vtk" in lowered
-        or bool(re.search(r"\.(?:vtk|vtu|vtp|vtr|vts|vti)\b", lowered))
-        or "result file" in lowered
-    )
-
-    if not has_vtk_ref and not allow_implicit:
-        return False
-
-    if not has_vtk_ref and allow_implicit:
-        has_result_hint = any(h in lowered for h in _IMPLICIT_RESULT_HINTS)
-        if has_result_hint and (_detect_aggregation(lowered) is not None or _detect_field(lowered) is not None):
-            return True
-
-        if has_result_hint and any(phrase in lowered for phrase in ("what is", "show", "compare", "give me", "how much")):
-            return True
-
-        return False
-
-    if any(hint in lowered for hint in _DETAIL_HINTS):
-        return True
-
-    if any(hint in lowered for hint in _FLEXURAL_HINTS):
-        return True
-
-    if _detect_aggregation(lowered):
-        return True
-
-    if "lookup" in lowered or "query" in lowered:
-        return True
-
-    return False
-
-
-def _parse_intent(
-    text: str,
-    *,
-    default_vtk_file: Optional[Path] = None,
-    allow_implicit: bool = False,
-) -> Optional[LookupIntent]:
-    if not _is_lookup_intent(text, allow_implicit=allow_implicit):
-        return None
-
-    lowered = _normalize_text(text)
-    vtk_file = _extract_vtk_path(text, default_vtk_file=default_vtk_file)
-    agg = _detect_aggregation(lowered)
-    field = _detect_field(lowered)
-    component = _detect_component(lowered)
-    use_abs = "absolute" in lowered or "abs" in lowered
-
-    if any(hint in lowered for hint in _FLEXURAL_HINTS):
-        with_plot = "contour" in lowered or "plot" in lowered
-        return LookupIntent(action="flexural", vtk_file=vtk_file, with_plot=with_plot)
-
-    if agg:
-        detected_field = field
-        field = _default_aggregate_field_for_query(lowered, detected_field)
-        if field is None:
-            # Generic stress query with no specific field: route to flexural report.
-            return LookupIntent(action="flexural", vtk_file=vtk_file, with_plot=False)
-        return LookupIntent(
-            action="aggregate",
-            vtk_file=vtk_file,
-            aggregation=agg,
-            field=field,
-            component=component,
-            use_abs=use_abs,
-            field_explicit=(detected_field is not None),
-        )
-
-    if _is_plot_request(lowered):
-        return LookupIntent(action="plots", vtk_file=vtk_file)
-
-    return LookupIntent(action="detail", vtk_file=vtk_file)
-
-
 def _build_planner_prompt(
     *,
     user_input: str,
@@ -393,11 +102,38 @@ def _build_planner_prompt(
             available_fields = []
 
     if not available_fields:
-        available_fields = sorted(_FIELD_ALIASES.keys())
+        available_fields = sorted([
+            "w",
+            "u",
+            "v",
+            "theta_x",
+            "theta_y",
+            "sxx_top",
+            "sxx_bottom",
+            "syy_top",
+            "syy_bottom",
+            "sxy_top",
+            "sxy_bottom",
+            "sxx_membrane",
+            "syy_membrane",
+            "sxy_membrane",
+            "displacement",
+        ])
 
     return (
-        "Classify and route the user query into one VTK action.\n"
-        "Return STRICT JSON with keys:\n"
+        f"allow_implicit={str(bool(allow_implicit)).lower()}\n"
+        f"vtk_file={vtk_file}\n"
+        f"AVAILABLE_FIELDS={', '.join(available_fields)}\n\n"
+        f"USER_QUERY: {user_input}\n\n"
+        "Return the JSON object."
+    )
+
+
+def _build_vtk_router_system_prompt() -> str:
+    return (
+        "You are a VTK result query router for a rigid pavement FEM analysis tool.\n"
+        "Classify the user's query and return STRICT JSON only - no prose, no explanation.\n\n"
+        "OUTPUT SCHEMA:\n"
         "{\n"
         '  "is_vtk_query": boolean,\n'
         '  "action": "detail" | "aggregate" | "flexural" | "plots" | "none",\n'
@@ -407,20 +143,37 @@ def _build_planner_prompt(
         '  "use_abs": boolean,\n'
         '  "with_plot": boolean\n'
         "}\n\n"
-        "Routing rules:\n"
-        "- detail: asks what fields/summary/info/list.\n"
-        "- aggregate: asks numeric statistic (mean/max/min/etc.) over one field.\n"
-        "- flexural: asks bending/flexural/top/bottom stress report.\n"
-        "- plots: asks to show/view generated plots or contour images.\n"
-        "- none: unrelated to VTK results.\n"
-        "- For aggregate, if no field is explicit but user asks deflection/displacement, use field='w'.\n"
-        "- For aggregate, if no field is explicit but user asks stress, route to flexural instead.\n"
-        "- Prefer field names from AVAILABLE_FIELDS.\n"
-        "- If the message is unrelated and allow_implicit is false, choose none.\n\n"
-        f"allow_implicit={str(bool(allow_implicit)).lower()}\n"
-        f"vtk_file={vtk_file}\n"
-        f"AVAILABLE_FIELDS={', '.join(available_fields)}\n"
-        f"USER_QUERY={user_input}"
+        "ROUTING RULES:\n"
+        "- detail: user asks what fields exist, wants summary/info/list of available fields.\n"
+        "- aggregate: user asks for a numeric statistic over one specific result field.\n"
+        "- flexural: user asks about bending/flexural stress, top/bottom surface stress, sigma_x, sigma_y.\n"
+        "- plots: user asks to see/show/view generated contour plots or images.\n"
+        "- none: query is unrelated to FEM/VTK results.\n\n"
+        "FIELD MAPPING (use exact canonical names):\n"
+        "- deflection / vertical displacement / out-of-plane displacement / w -> field='w'\n"
+        "- x displacement / longitudinal displacement / u -> field='u'\n"
+        "- y displacement / transverse displacement / v -> field='v'\n"
+        "- rotation about y / slope x / theta_x -> field='theta_x'\n"
+        "- rotation about x / slope y / theta_y -> field='theta_y'\n"
+        "- sigma_x top / sxx top / top normal stress x -> field='sxx_top'\n"
+        "- sigma_x bottom / sxx bottom -> field='sxx_bottom'\n"
+        "- sigma_y top / syy top -> field='syy_top'\n"
+        "- sigma_y bottom / syy bottom -> field='syy_bottom'\n"
+        "- shear top / tau_xy top / sxy top -> field='sxy_top'\n"
+        "- shear bottom / sxy bottom -> field='sxy_bottom'\n"
+        "- If user asks about 'stress' generally -> route to flexural (action='flexural', field=null)\n"
+        "- If field is unclear for aggregate -> set field=null (will route to flexural)\n\n"
+        "AGGREGATION MAPPING:\n"
+        "- maximum / highest / peak / max -> 'max'\n"
+        "- minimum / lowest / min -> 'min'\n"
+        "- average / mean / avg -> 'mean'\n"
+        "- standard deviation / std / stdev -> 'std'\n"
+        "- total / sum -> 'sum'\n"
+        "- median -> 'median'\n"
+        "- 95th percentile / p95 -> 'p95'\n"
+        "- 5th percentile / p05 -> 'p05'\n\n"
+        "allow_implicit=true means treat implicit result references (deflection, stress) "
+        "as VTK queries even without the word 'vtk'.\n"
     )
 
 
@@ -435,13 +188,40 @@ def _parse_agentic_intent(
         return None
 
     vtk_file = _extract_vtk_path(user_input, default_vtk_file=default_vtk_file)
-    system = SystemMessage(
-        content=(
-            "You are a VTK tool router for pavement analysis. "
-            "Return JSON only. Never explain your reasoning."
+    available_fields: List[str] = []
+    if vtk_file.exists():
+        try:
+            info = describe_dataset(str(vtk_file))
+            available_fields = list(info.get("available_fields", {}).get("point_data", []) or [])
+        except Exception:
+            pass
+    if not available_fields:
+        available_fields = [
+            "w",
+            "u",
+            "v",
+            "theta_x",
+            "theta_y",
+            "sxx_top",
+            "sxx_bottom",
+            "syy_top",
+            "syy_bottom",
+            "sxy_top",
+            "sxy_bottom",
+            "sxx_membrane",
+            "syy_membrane",
+            "sxy_membrane",
+            "displacement",
+        ]
+
+    system = SystemMessage(content=_build_vtk_router_system_prompt())
+    human = HumanMessage(
+        content=_build_planner_prompt(
+            user_input=user_input,
+            vtk_file=vtk_file,
+            allow_implicit=allow_implicit,
         )
     )
-    human = HumanMessage(content=_build_planner_prompt(user_input=user_input, vtk_file=vtk_file, allow_implicit=allow_implicit))
 
     try:
         response = _invoke_llm_with_timeout(llm, [system, human], timeout_seconds=10.0)
@@ -456,7 +236,7 @@ def _parse_agentic_intent(
     if not bool(payload.get("is_vtk_query")):
         return None
 
-    action = _normalize_text(str(payload.get("action") or "none"))
+    action = " ".join(str(payload.get("action") or "none").strip().lower().split())
     if action in {"", "none", "null"}:
         return None
 
@@ -467,45 +247,31 @@ def _parse_agentic_intent(
         return LookupIntent(action="detail", vtk_file=vtk_file)
 
     if action == "flexural":
-        with_plot = bool(payload.get("with_plot")) or _is_plot_request(user_input)
+        with_plot = bool(payload.get("with_plot"))
         return LookupIntent(action="flexural", vtk_file=vtk_file, with_plot=with_plot)
 
     if action == "aggregate":
-        requested_field = payload.get("field")
-        requested_component = payload.get("component")
-        requested_agg = payload.get("aggregation")
-
-        detected_field = _detect_field(str(requested_field)) if requested_field else None
-        if not detected_field:
-            detected_field = _detect_field(user_input)
-
-        field = _default_aggregate_field_for_query(user_input, detected_field)
-        if field is None:
-            # Generic stress query: route to flexural report.
-            with_plot = bool(payload.get("with_plot")) or _is_plot_request(user_input)
+        field = payload.get("field")
+        if not field:
+            with_plot = bool(payload.get("with_plot"))
             return LookupIntent(action="flexural", vtk_file=vtk_file, with_plot=with_plot)
 
-        aggregation = _coerce_aggregation(str(requested_agg) if requested_agg is not None else None)
-        if not aggregation:
-            aggregation = _detect_aggregation(user_input) or "mean"
+        aggregation = str(payload.get("aggregation") or "mean")
+        component_raw = payload.get("component")
+        component = (
+            str(component_raw)
+            if isinstance(component_raw, str) and component_raw in {"x", "y", "z", "magnitude"}
+            else None
+        )
 
-        component = None
-        if isinstance(requested_component, str):
-            normalized_component = _normalize_text(requested_component)
-            if normalized_component in {"x", "y", "z", "magnitude"}:
-                component = normalized_component
-        if component is None:
-            component = _detect_component(user_input)
-
-        use_abs = bool(payload.get("use_abs")) or ("absolute" in _normalize_text(user_input))
         return LookupIntent(
             action="aggregate",
             vtk_file=vtk_file,
             aggregation=aggregation,
-            field=field,
+            field=str(field),
             component=component,
-            use_abs=use_abs,
-            field_explicit=(detected_field is not None),
+            use_abs=bool(payload.get("use_abs")),
+            field_explicit=True,
         )
 
     return None
@@ -806,7 +572,7 @@ def _run_global_stress_query(vtk_file: Path, aggregation: str) -> str:
     agg_label = aggregation.upper()
     field_results: Dict[str, Optional[float]] = {}
 
-    for field_name in _FLEXURAL_STRESS_FIELDS:
+    for field_name in ("sxx_top", "sxx_bottom", "syy_top", "syy_bottom"):
         try:
             payload = _run_script(AGG_SCRIPT, [
                 "--file", str(vtk_file),
@@ -828,7 +594,7 @@ def _run_global_stress_query(vtk_file: Path, aggregation: str) -> str:
     best_field: Optional[str] = None
     best_value: Optional[float] = None
 
-    for field_name in _FLEXURAL_STRESS_FIELDS:
+    for field_name in ("sxx_top", "sxx_bottom", "syy_top", "syy_bottom"):
         label, surface = _GLOBAL_STRESS_LABELS[field_name]
         val = field_results.get(field_name)
         if val is not None:
@@ -866,7 +632,6 @@ def handle_vtk_lookup_command(
     allow_implicit: bool = False,
     api_base_url: str = "",
     llm: Optional[ChatOllama] = None,
-    prefer_agentic: bool = False,
     available_plot_urls: Optional[List[str]] = None,
     narration_url: Optional[str] = None,
     narration_model: Optional[str] = None,
@@ -875,21 +640,12 @@ def handle_vtk_lookup_command(
     fallback_path = Path(default_vtk_file).resolve() if default_vtk_file else None
     plot_urls = [url for url in (available_plot_urls or []) if isinstance(url, str) and url.strip()]
 
-    intent: Optional[LookupIntent] = None
-    if prefer_agentic and llm is not None:
-        intent = _parse_agentic_intent(
-            user_input,
-            llm=llm,
-            default_vtk_file=fallback_path,
-            allow_implicit=allow_implicit,
-        )
-
-    if intent is None:
-        intent = _parse_intent(
-            user_input,
-            default_vtk_file=fallback_path,
-            allow_implicit=allow_implicit,
-        )
+    intent: Optional[LookupIntent] = _parse_agentic_intent(
+        user_input,
+        llm=llm,
+        default_vtk_file=fallback_path,
+        allow_implicit=allow_implicit,
+    )
 
     if intent is None:
         return None
@@ -897,9 +653,20 @@ def handle_vtk_lookup_command(
     # Qualitative questions (analysis, interpretation, inferences) should fall through
     # to generate_vtk_agent_response rather than returning a deterministic field listing.
     if intent.action == "detail":
-        lowered_input = _normalize_text(user_input)
-        has_qualitative = any(term in lowered_input for term in _QUALITATIVE_ANALYSIS_TERMS)
-        has_listing = any(term in lowered_input for term in _FIELD_LISTING_TERMS)
+        lowered_input = " ".join((user_input or "").strip().lower().split())
+        qualitative_terms = {
+            "analyse", "analyze", "explain", "interpret", "inference", "infer",
+            "describe", "tell me about", "discuss", "insights", "what can you",
+            "observations", "understand", "give me insight", "give me inference",
+            "look at the", "examine", "what does it", "what do you see",
+            "what can we", "read the plot", "read the graph", "read the result",
+        }
+        listing_terms = {
+            "list fields", "list vtk", "what fields", "available fields",
+            "show fields", "vtk info", "vtk summary", "vtk details", "list all fields",
+        }
+        has_qualitative = any(term in lowered_input for term in qualitative_terms)
+        has_listing = any(term in lowered_input for term in listing_terms)
         if has_qualitative and not has_listing:
             return None
 
@@ -967,8 +734,8 @@ def handle_vtk_lookup_command(
         if intent.action == "aggregate":
             # When the field was not explicitly specified and the query involves generic stress,
             # run a global multi-field scan across all 4 flexural stress fields.
-            lowered_input = _normalize_text(user_input)
-            if not intent.field_explicit and any(t in lowered_input for t in _GENERIC_STRESS_TERMS):
+            lowered_input = " ".join((user_input or "").strip().lower().split())
+            if not intent.field_explicit and any(t in lowered_input for t in {"stress", "sigma"}):
                 formatted = _run_global_stress_query(intent.vtk_file, intent.aggregation or "max")
                 if can_narrate:
                     narrated = _narrate_with_kimi(

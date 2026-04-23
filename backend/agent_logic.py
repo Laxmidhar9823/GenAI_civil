@@ -641,33 +641,23 @@ PARAM_ALIASES = {
 
 
 def normalize_mesh_type(value: Any) -> Optional[str]:
-    if not isinstance(value, str):
-        return None
-    text = value.strip().lower()
-    if text in {"1", "coarse", "coarser", "low", "low mesh", "low density"}:
+    text = str(value or "").strip().lower()
+    if text in {"coarse", "1"}:
         return "coarse"
-    if text in {"2", "medium", "med", "mid", "moderate"}:
+    if text in {"medium", "2"}:
         return "medium"
-    if text in {"3", "fine", "finer", "high", "high mesh", "high density"}:
+    if text in {"fine", "3"}:
         return "fine"
     return None
 
 
 def normalize_load_location(value: Any) -> Optional[str]:
-    if not isinstance(value, str):
-        return None
-    text = value.strip().lower()
-    if text in {"1", "corner", "at corner", "on corner", "corner load"}:
+    text = str(value or "").strip().lower()
+    if text in {"corner", "1"}:
         return "corner"
-    if text in {"2", "edge", "at edge", "on edge", "edge load", "near edge"}:
+    if text in {"edge", "2"}:
         return "edge"
-    if text in {"3", "interior", "inside", "middle", "center", "centre", "at interior"}:
-        return "interior"
-    if "corner" in text:
-        return "corner"
-    if "edge" in text:
-        return "edge"
-    if any(word in text for word in ["interior", "inside", "middle", "center", "centre"]):
+    if text in {"interior", "3"}:
         return "interior"
     return None
 
@@ -2323,73 +2313,46 @@ def create_expert_system_prompt() -> str:
     )
 
 
-def create_extraction_prompt(user_input: str, context: str, current_asking: Optional[str] = None) -> str:
-    prompt = f"""### CONTEXT
-{context}
+def create_extraction_prompt(
+    user_input: str,
+    context: str,
+    current_asking: Optional[str] = None,
+    params: Optional[Dict[str, Any]] = None,
+) -> str:
+    if current_asking and current_asking in PARAM_INFO:
+        info = PARAM_INFO[current_asking]
+        default_val = get_default_value(current_asking)
+        asking_block = (
+            f"CURRENTLY ASKING ABOUT: {info['name']} ({current_asking})\n"
+            f"  Unit: {info.get('unit', 'N/A')}\n"
+            f"  Typical range: {info.get('typical_range', 'N/A')}\n"
+            f"  Safe default: {default_val}\n"
+            f"  If user says yes/ok/sure/that's fine -> set use_default=true\n"
+        )
+    else:
+        asking_block = (
+            "CURRENTLY ASKING ABOUT: General input\n"
+            "  Extract any and all parameters mentioned in the message.\n"
+        )
 
-### NODE CONTEXT
-- Node coordinates are inferred from mesh_type:
-    - coarse -> 10x10 elements
-    - medium -> 15x15 elements
-    - fine -> 30x30 elements
-- Load coordinates are inferred from load_location:
-    - corner, edge, interior
-- Extract mesh_type/load_location when user mentions these classes.
+    collected_params = {k: v for k, v in (params or {}).items() if not str(k).startswith("_")}
+    params_block = (
+        f"ALREADY COLLECTED PARAMETERS:\n{json.dumps(collected_params, indent=2)}\n"
+        if collected_params
+        else "ALREADY COLLECTED PARAMETERS: (none yet)\n"
+    )
 
-### USER INPUT
-"{user_input}"
-
-### CURRENTLY ASKING ABOUT
-{f"Parameter: {current_asking} ({PARAM_INFO[current_asking]['name']})" if current_asking else "General conversation - extract any parameters mentioned"}
-
-### EXAMPLES (few-shot)
-
-Input: "5m × 3.5m slab, 250mm thick, M30 concrete, K=60, 80kN load at edge over 350×300mm contact"
-→ extracted_multiple: {{"a":5000,"b":3500,"t":250,"Emod":27386,"Kx":60,"Ky":60,"Kz":60,"load_location":"edge","q":0.762}}
-→ friendly_response: "Great — I captured slab dimensions, M30 grade (E = 27,386 MPa from IS 456), K = 60, and computed contact pressure 0.762 MPa from the 80 kN load over 350 × 300 mm."
-
-Input: "use medium mesh, load at corner with 200×200 contact"
-→ extracted_multiple: {{"mesh_type":"medium","load_location":"corner"}}
-→ friendly_response: "Medium mesh and corner load noted. I'll compute the load patch starting at the corner based on your 200 × 200 mm contact area."
-
-Input: "tandem, two 60kN wheels, 300×300mm each, 1.2m spacing, interior"
-→ extracted_multiple: {{"load_location":"interior","q":0.667}}
-→ friendly_response: "Tandem setup noted — two 60 kN wheels at 1.2 m spacing, each on 300 × 300 mm contact (q = 0.667 MPa). I'll compute both wheel positions for the interior case."
-
-### TASK
-1. Decide user intent:
-    - provide one value,
-    - provide multiple values,
-    - use default for current field,
-    - use defaults for all remaining fields,
-    - ask a question / need clarification.
-2. Extract values and units if present.
-3. Map values to correct parameter keys.
-4. If uncertain, set needs_clarification=true.
-5. Write friendly_response as a natural beginner-friendly assistant.
-
-### OUTPUT FORMAT (JSON only, no other text):
-{{
-    "understood_value": <number|string or null if not providing a value>,
-    "original_unit": "<unit mentioned by user or null>",
-    "parameter_key": "<which parameter this is for>",
-    "use_default": <true/false - if user wants default for CURRENT parameter>,
-    "use_all_defaults": <true/false - if user wants defaults for ALL remaining parameters>,
-    "needs_clarification": <true/false>,
-    "friendly_response": "<your warm, friendly response to the user>",
-    "extracted_multiple": {{<any additional parameters if user mentioned multiple>}}
-}}
-
-IMPORTANT DETECTION RULES:
-- Prioritize extracting multiple parameters from one user message when possible.
-- If a user message includes updates to existing values, use the newest values.
-- Detect mesh_type from: coarse / medium / fine (or 1/2/3).
-- Detect load_location from: corner / edge / interior (or 1/2/3).
-- Never expose raw JSON, schema keys, or implementation details in friendly_response.
-- Be warm, concise, and proactive.
-
-JSON RESPONSE:"""
-    return prompt
+    return (
+        f"### CONVERSATION CONTEXT\n{context}\n\n"
+        f"### {asking_block}\n"
+        f"### {params_block}\n"
+        f"### USER MESSAGE\n\"{user_input}\"\n\n"
+        "### TASK\n"
+        "Using the system prompt rules, extract and compute all relevant parameters "
+        "from the user message. Return ONLY the JSON object. No markdown fences, "
+        "no explanation, no prose before or after.\n\n"
+        "JSON:"
+    )
 
 
 def build_llm_message_history(messages: List[Dict]) -> List:
@@ -2459,265 +2422,113 @@ def process_user_input_with_llm(
     params: Optional[Dict[str, Any]] = None,
     current_asking: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Process user input through LLM for extraction and response generation."""
+    _FALLBACK: Dict[str, Any] = {
+        "needs_clarification": True,
+        "clarification_question": None,
+        "friendly_response": (
+            "I didn't quite catch that. Could you rephrase? "
+            "You can share values like 'slab 5m x 3m, 250mm thick, M30, K=60'."
+        ),
+        "use_default": False,
+        "use_all_defaults": False,
+        "conversation_only": False,
+        "understood": {},
+        "computed": {},
+        "extracted_multiple": {},
+        "extracted_units": {},
+        "parameter_key": current_asking,
+        "understood_value": None,
+        "original_unit": None,
+    }
 
-    # First: deterministic conversation handling (greetings, help, explanations).
-    convo = handle_conversational_intent(user_input, params=params or {}, current_asking=current_asking)
-    if convo is not None:
-        return convo
+    def _parse_json(content: str) -> Optional[Dict[str, Any]]:
+        body = (content or "").strip()
+        if body.startswith("```"):
+            first_nl = body.find("\n")
+            if first_nl != -1:
+                body = body[first_nl + 1 :]
+            if body.endswith("```"):
+                body = body[:-3]
+            body = body.strip()
+        start = body.find("{")
+        end = body.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            return None
+        try:
+            parsed = json.loads(body[start : end + 1])
+            return parsed if isinstance(parsed, dict) else None
+        except json.JSONDecodeError:
+            return None
 
-    stripped_input = user_input.strip().lower()
+    def _normalize_result(raw: Dict[str, Any]) -> Dict[str, Any]:
+        raw.setdefault("needs_clarification", False)
+        raw.setdefault("clarification_question", None)
+        raw.setdefault("friendly_response", "")
+        raw.setdefault("use_default", False)
+        raw.setdefault("use_all_defaults", False)
+        raw.setdefault("conversation_only", False)
+        raw.setdefault("understood", {})
+        raw.setdefault("computed", {})
 
-    if current_asking and stripped_input in SINGLE_DEFAULT_PATTERNS and not _contains_default_keyword(user_input):
-        return {
-            "understood_value": None,
-            "use_default": True,
-            "use_all_defaults": False,
-            "needs_clarification": False,
-            "friendly_response": "Absolutely, we can use the suggested value for this one.",
-            "original_unit": None,
-            "parameter_key": current_asking,
-            "extracted_multiple": {},
-        }
+        computed = raw.get("computed") or {}
+        raw["extracted_multiple"] = {k: v for k, v in computed.items() if not str(k).startswith("_")}
+        raw.setdefault("extracted_units", {})
+        raw.setdefault("parameter_key", current_asking)
+        raw.setdefault("understood_value", None)
+        raw.setdefault("original_unit", None)
+        return raw
 
-    semantic_choices = infer_semantic_choices(user_input, current_asking)
-    heuristic_candidates = parse_multi_param_candidates(user_input)
-    node_list_candidates = _parse_node_list_candidates(user_input)
-    engineering_candidates, engineering_units = _extract_engineering_candidates(user_input)
-
-    extracted_multiple: Dict[str, Any] = {}
-    extracted_units: Dict[str, str] = {}
-
-    if semantic_choices:
-        extracted_multiple.update(semantic_choices)
-    if engineering_candidates:
-        extracted_multiple.update(engineering_candidates)
-    for key, (value, unit) in heuristic_candidates.items():
-        # Prefer deterministic engineering parsing for domain-specific fields when present.
-        if key not in extracted_multiple:
-            extracted_multiple[key] = value
-            if unit:
-                extracted_units[key] = unit
-    for key, values in node_list_candidates.items():
-        extracted_multiple[key] = values
-    extracted_units.update(engineering_units)
-
-    if extracted_multiple:
-        # friendly_response is intentionally None here — generate_autonomous_assistant_message()
-        # will narrate the captured values naturally instead of a hardcoded static string.
-        friendly: Optional[str] = None
-
-        understood_value: Optional[float] = None
-        original_unit: Optional[str] = None
-
-        # If the user included multiple values but only explicitly keyed some of them,
-        # preserve the remaining (unclaimed) number as the answer to the current question.
-        if (
-            current_asking
-            and current_asking not in extracted_multiple
-            and current_asking not in NODE_PARAM_KEYS
-            and current_asking not in {MESH_TYPE_KEY, LOAD_LOCATION_KEY}
-        ):
-            occurrences = _extract_all_numbers_with_units(user_input)
-
-            # Build numeric claims from extracted_multiple and try to match occurrences to those claims.
-            claims: List[Tuple[str, float]] = [
-                (key, float(val))
-                for key, val in extracted_multiple.items()
-                if isinstance(val, (int, float)) and key in PARAM_INFO
-            ]
-            used = [False] * len(claims)
-            leftovers: List[Tuple[float, Optional[str]]] = []
-
-            tol = 1e-9
-            for value, unit in occurrences:
-                matched = False
-                for idx, (key, claim_val) in enumerate(claims):
-                    if used[idx]:
-                        continue
-                    if abs(claim_val - float(value)) <= tol:
-                        used[idx] = True
-                        matched = True
-                        break
-                    if unit and key not in extracted_units:
-                        converted_value, _ = convert_to_standard_unit(float(value), unit, key)
-                        if abs(float(converted_value) - float(claim_val)) <= tol:
-                            used[idx] = True
-                            matched = True
-                            break
-                if not matched:
-                    leftovers.append((float(value), unit))
-
-            if leftovers:
-                stripped = user_input.strip().lower()
-                starts_with_number = bool(re.match(r"^-?\d", stripped))
-
-                tokens = _tokenize_for_numbers(user_input)
-                alias_hit = False
-                for alias in PARAM_ALIASES.get(current_asking, []):
-                    phrase_tokens = alias.split()
-                    if _find_phrase_indices(tokens, phrase_tokens):
-                        alias_hit = True
-                        break
-
-                expected_unit = str(PARAM_INFO.get(current_asking, {}).get("unit", "")).strip().lower()
-                alt_units = PARAM_INFO.get(current_asking, {}).get("alt_units", {}) or {}
-                compatible_units = {expected_unit} | {str(u).strip().lower() for u in alt_units.keys()}
-
-                chosen: Optional[Tuple[float, Optional[str]]] = None
-                for value, unit in leftovers:
-                    if unit and unit.strip().lower() in compatible_units:
-                        chosen = (float(value), unit)
-                        break
-
-                if chosen is None and (starts_with_number or alias_hit):
-                    chosen = (float(leftovers[0][0]), leftovers[0][1])
-
-                if chosen is not None:
-                    understood_value = float(chosen[0])
-                    original_unit = chosen[1]
-
-        # Check for partial/ambiguous input pairs (e.g., contact area but no load location).
-        ambiguity = _detect_extraction_ambiguity(extracted_multiple, params or {})
-        needs_clarification = ambiguity is not None
-        if ambiguity:
-            friendly = ambiguity
-
-        return {
-            "understood_value": understood_value,
-            "use_default": False,
-            "use_all_defaults": False,
-            "needs_clarification": needs_clarification,
-            "friendly_response": friendly,
-            "original_unit": original_unit,
-            "parameter_key": current_asking,
-            "extracted_multiple": extracted_multiple,
-            "extracted_units": extracted_units,
-            "conversation_only": False,
-        }
-
-    # Deterministic guided fallback: if we're asking a specific field and the
-    # user provided a number, capture it without requiring an LLM call.
-    if current_asking:
-        num, unit = _extract_first_number_with_unit(user_input)
-        if isinstance(num, (int, float)):
-            return {
-                "understood_value": float(num),
-                "use_default": False,
-                "use_all_defaults": False,
-                "needs_clarification": False,
-                "friendly_response": "Thanks, I captured that value.",
-                "original_unit": unit,
-                "parameter_key": current_asking,
-                "extracted_multiple": {},
-            }
+    system_msg = SystemMessage(content=create_expert_system_prompt())
+    human_content = create_extraction_prompt(user_input, context, current_asking, params)
 
     try:
-        system_message = SystemMessage(content=create_expert_system_prompt())
-        extraction_prompt = create_extraction_prompt(user_input, context, current_asking)
-        human_message = HumanMessage(content=extraction_prompt)
+        response = _invoke_llm_with_timeout(llm, [system_msg, HumanMessage(content=human_content)])
+        content = str(getattr(response, "content", "") or "")
+        result = _parse_json(content)
 
-        response = _invoke_llm_with_timeout(llm, [system_message, human_message])
+        if result is None:
+            retry_content = human_content + "\n\nReturn ONLY the JSON object. No markdown, no explanation."
+            response2 = _invoke_llm_with_timeout(llm, [system_msg, HumanMessage(content=retry_content)])
+            content2 = str(getattr(response2, "content", "") or "")
+            result = _parse_json(content2)
 
-        if response and response.content:
-            content = response.content.strip()
+        if result is None:
+            return _FALLBACK
 
-            if content.startswith("```"):
-                first_newline = content.find("\n")
-                if first_newline != -1:
-                    content = content[first_newline + 1 :]
-                if content.endswith("```"):
-                    content = content[:-3]
-                content = content.strip()
-
-            start = content.find("{")
-            end = content.rfind("}")
-            if start != -1 and end != -1 and end > start:
-                content = content[start : end + 1]
-
-            try:
-                result = json.loads(content)
-
-                result.setdefault("understood_value", None)
-                result.setdefault("use_default", False)
-                result.setdefault("use_all_defaults", False)
-                result.setdefault("needs_clarification", False)
-                result.setdefault("friendly_response", "")
-                result.setdefault("original_unit", None)
-                result.setdefault("parameter_key", current_asking)
-                result.setdefault("extracted_multiple", {})
-
-                return result
-            except json.JSONDecodeError:
-                if current_asking:
-                    if current_asking in heuristic_candidates:
-                        num, unit = heuristic_candidates[current_asking]
-                    else:
-                        num, unit = _extract_first_number_with_unit(user_input)
-                    if num is not None and isinstance(num, (int, float)):
-                        return {
-                            "understood_value": num,
-                            "use_default": False,
-                            "use_all_defaults": False,
-                            "needs_clarification": False,
-                            "friendly_response": "Thanks, I captured that value.",
-                            "original_unit": unit,
-                            "parameter_key": current_asking,
-                            "extracted_multiple": {},
-                        }
-                return {
-                    "understood_value": None,
-                    "use_default": False,
-                    "use_all_defaults": False,
-                    "needs_clarification": True,
-                    "friendly_response": "I'm not quite sure I understood that. Could you try again? You can enter a number, or say 'default' to use the suggested value. 😊",
-                }
-
-        return {"needs_clarification": True, "friendly_response": "I didn't catch that. Could you please try again?"}
+        return _normalize_result(result)
 
     except TimeoutError:
-        return {
-            "needs_clarification": True,
-            "friendly_response": "I’m having trouble reaching the model right now. If you share the key numbers (slab size, thickness, concrete grade, K value, wheel load/contact area), I can still capture them — or you can say ‘let’s begin’ for guided setup.",
-        }
+        fallback = dict(_FALLBACK)
+        fallback["friendly_response"] = (
+            "I'm having trouble reaching the model right now. "
+            "If you share the key numbers (slab size, thickness, concrete grade, "
+            "K value, wheel load/contact area), I can still capture them - "
+            "or say 'let's begin' for guided setup."
+        )
+        return fallback
+
     except Exception as exc:
-        err_text = str(exc).strip()
-        lowered_err = err_text.lower()
-
-        if "model" in lowered_err and "not found" in lowered_err:
-            return {
-                "needs_clarification": True,
-                "friendly_response": (
-                    "I couldn't use the selected Ollama model because it is not installed. "
-                    "Please choose an available model in settings, or try again and I'll continue with a fallback model if available."
-                ),
-            }
-
-        if "unauthorized" in lowered_err or "status code: 401" in lowered_err:
-            return {
-                "needs_clarification": True,
-                "friendly_response": (
-                    "Your Ollama model request is unauthorized (401). "
-                    "This usually means the selected cloud model needs authentication. "
-                    "Please switch to a locally available model in settings or configure Ollama cloud auth, then try again."
-                ),
-            }
-
-        if "cannot reach ollama" in lowered_err or "connection" in lowered_err:
-            return {
-                "needs_clarification": True,
-                "friendly_response": (
-                    "I couldn't reach your Ollama server. Please ensure Ollama is running and the URL is correct, then try again."
-                ),
-            }
-
-        return {
-            "needs_clarification": True,
-            "friendly_response": (
-                "I hit an internal processing issue while understanding that message. "
-                "Please try again in one sentence with key values (for example: length 5m, width 5m, thickness 200mm)."
-            ),
-        }
+        err_text = str(exc).strip().lower()
+        if "model" in err_text and "not found" in err_text:
+            msg = (
+                "The selected Ollama model is not installed. "
+                "Please choose an available model in settings."
+            )
+        elif "unauthorized" in err_text or "401" in err_text:
+            msg = (
+                "Authentication failed (401). "
+                "Please check your API key in settings or switch to a local model."
+            )
+        elif "connection" in err_text or "cannot reach" in err_text:
+            msg = "Cannot reach the Ollama server. Please ensure Ollama is running and try again."
+        else:
+            msg = (
+                "I hit an internal processing issue. "
+                "Please try again with key values (e.g., length 5m, width 5m, thickness 200mm)."
+            )
+        fallback = dict(_FALLBACK)
+        fallback["friendly_response"] = msg
+        return fallback
 
 
 def generate_welcome_message() -> str:

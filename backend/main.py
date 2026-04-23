@@ -32,7 +32,6 @@ from backend.agent_logic import (
     build_conversation_context,
     find_first_inconsistent_param,
     get_default_value,
-    apply_implicit_inferences,
     check_physical_feasibility,
     normalize_load_location,
     normalize_mesh_type,
@@ -518,7 +517,6 @@ def chat(req: ChatRequest) -> ChatResponse:
         allow_implicit=bool(analysis_vtk),
         api_base_url=API_BASE_URL,
         llm=vtk_llm,
-        prefer_agentic=True,
         available_plot_urls=state.analysis_plot_files,
         narration_url=req.llm_config.ollama_url,
         narration_model=VTK_AGENT_MODEL,
@@ -591,7 +589,7 @@ def chat(req: ChatRequest) -> ChatResponse:
 
         conversation_only = bool(result.get("conversation_only"))
 
-        extracted_multiple = result.get("extracted_multiple") or {}
+        extracted_multiple = result.get("computed") or result.get("extracted_multiple") or {}
         extracted_units = result.get("extracted_units") or {}
         single_value = result.get("understood_value")
         single_key = result.get("parameter_key") or state.current_asking
@@ -681,8 +679,7 @@ def chat(req: ChatRequest) -> ChatResponse:
             for key in missing:
                 state.params[key] = get_default_value(key)
 
-            _, inference_notes = apply_implicit_inferences(state.params, state.user_provided_keys)
-            inference_notes.extend(check_physical_feasibility(state.params))
+            inference_notes = check_physical_feasibility(state.params)
 
             state.mode = "complete"
             if missing:
@@ -806,19 +803,13 @@ def chat(req: ChatRequest) -> ChatResponse:
                     if key in explicit_keys and key not in default_applied_keys and key not in state.user_provided_keys:
                         state.user_provided_keys.append(key)
 
-                # When multi-wheel load_cases were applied, mark load coord keys as user-provided
-                # so apply_implicit_inferences() doesn't overwrite them with the 20% heuristic.
+                # Keep load-case keys explicit so completion summaries preserve user intent.
                 if applied_load_cases:
                     for k in ["x1", "x2", "y1", "y2", "load_cases"]:
                         if k not in state.user_provided_keys:
                             state.user_provided_keys.append(k)
 
-                inferred_keys, inference_notes = apply_implicit_inferences(state.params, state.user_provided_keys)
-                inference_notes.extend(check_physical_feasibility(state.params))
-                for inferred_key in inferred_keys:
-                    if inferred_key in tentative:
-                        tentative[inferred_key] = state.params[inferred_key]
-                applied.extend([k for k in inferred_keys if k not in applied])
+                inference_notes = check_physical_feasibility(state.params)
             else:
                 inference_notes = []
 

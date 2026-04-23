@@ -2,7 +2,6 @@
 import json
 import pytest
 from unittest.mock import MagicMock
-from pathlib import Path
 from backend.vtk_lookup_agent import (
     _build_vtk_router_system_prompt,
     _parse_agentic_intent,
@@ -140,3 +139,54 @@ class TestParseAgenticIntent:
         )
         assert result is not None
         assert result.action == "flexural"
+
+    def test_detail_query_returns_detail_intent(self):
+        payload = {
+            "is_vtk_query": True,
+            "action": "detail",
+            "field": None,
+            "aggregation": None,
+            "component": None,
+            "use_abs": False,
+            "with_plot": False,
+        }
+        mock_llm = self._make_llm_mock(json.dumps(payload))
+        result = _parse_agentic_intent(
+            "list available vtk fields",
+            llm=mock_llm,
+            default_vtk_file=None,
+            allow_implicit=True,
+        )
+        assert result is not None
+        assert result.action == "detail"
+
+    def test_plots_query_returns_plots_intent(self):
+        payload = {
+            "is_vtk_query": True,
+            "action": "plots",
+            "field": None,
+            "aggregation": None,
+            "component": None,
+            "use_abs": False,
+            "with_plot": False,
+        }
+        mock_llm = self._make_llm_mock(json.dumps(payload))
+        result = _parse_agentic_intent(
+            "show me the generated plots",
+            llm=mock_llm,
+            default_vtk_file=None,
+            allow_implicit=True,
+        )
+        assert result is not None
+        assert result.action == "plots"
+
+    def test_llm_exception_returns_none(self):
+        mock_llm = MagicMock()
+        mock_llm.invoke.side_effect = Exception("connection error")
+        result = _parse_agentic_intent(
+            "max deflection?",
+            llm=mock_llm,
+            default_vtk_file=None,
+            allow_implicit=True,
+        )
+        assert result is None

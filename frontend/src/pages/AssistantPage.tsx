@@ -127,7 +127,6 @@ export default function AssistantPage() {
     prevFinalParamsRef.current = finalParams
 
     if (finalParams === null) {
-      exportTourTriggeredRef.current = false
       setShowExportTour(false)
       return
     }

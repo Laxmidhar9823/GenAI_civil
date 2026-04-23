@@ -2212,8 +2212,56 @@ PARAMETER CATALOG:
     )
 
 
-def create_extraction_prompt(user_input: str, context: str, current_asking: Optional[str] = None) -> str:
-    prompt = f"""### CONTEXT
+def create_extraction_prompt(
+    user_input: str,
+    context: str,
+    current_asking: Optional[str] = None,
+    ambiguity_context: Optional[Dict[str, str]] = None,
+    confirmed_extracted: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Build the LLM extraction prompt.
+
+    ambiguity_context: {param_key: description} for params whose values are uncertain
+        due to missing units.  When non-empty the prompt instructs the LLM to ask
+        one focused clarification question and NOT include those keys in extracted_multiple.
+    confirmed_extracted: values that were deterministically extracted without ambiguity
+        and have already been applied to state — included so the LLM can reference them
+        in its response without re-asking for them.
+    """
+
+    ambiguity_block = ""
+    if ambiguity_context:
+        unique_msgs = list(dict.fromkeys(ambiguity_context.values()))
+        ambiguity_lines = "\n".join(f"- {msg}" for msg in unique_msgs)
+        confirmed_lines = ""
+        if confirmed_extracted:
+            confirmed_lines = "\n".join(
+                f"- {PARAM_INFO.get(k, {}).get('name', k)}: "
+                f"{format_value_with_unit(v, k) if not isinstance(v, list) else str(v)}"
+                for k, v in confirmed_extracted.items()
+                if k in PARAM_INFO
+            )
+        ambiguity_block = f"""
+### ⚠️ AMBIGUITY ALERT — UNITS MISSING (read carefully before responding)
+The following values from the user's message could NOT be reliably interpreted
+because no unit was provided. Do NOT assume a unit and do NOT include these
+parameters in extracted_multiple.
+
+{ambiguity_lines}
+
+{f"The following values WERE clearly captured and are already saved:{chr(10)}{confirmed_lines}" if confirmed_lines else "No other values were clearly captured from this message."}
+
+YOUR REQUIRED BEHAVIOR:
+1. Acknowledge any values that were successfully captured (listed above).
+2. Ask the user ONE focused question to clarify the unit for the ambiguous value(s).
+   Example: "Your slab appears to be '4 × 6' — are those meters, feet, or millimeters?"
+3. Set needs_clarification = true.
+4. Leave all ambiguous parameter keys OUT of extracted_multiple.
+5. Do NOT guess or apply a default unit.
+
+"""
+
+    prompt = f"""{ambiguity_block}### CONTEXT
 {context}
 
 ### NODE CONTEXT
@@ -2245,6 +2293,11 @@ Input: "tandem, two 60kN wheels, 300×300mm each, 1.2m spacing, interior"
 → extracted_multiple: {{"load_location":"interior","q":0.667}}
 → friendly_response: "Tandem setup noted — two 60 kN wheels at 1.2 m spacing, each on 300 × 300 mm contact (q = 0.667 MPa). I'll compute both wheel positions for the interior case."
 
+Input (AMBIGUOUS — no unit): "my slab is 4x6 and my thickness is 4"
+→ extracted_multiple: {{}}
+→ needs_clarification: true
+→ friendly_response: "I can see you have a slab that's 4 × 6 with a thickness of 4, but I need the units to capture these correctly. Are those in meters, feet, or millimeters? For example: '4 m × 6 m, 200 mm thick'."
+
 ### TASK
 1. Decide user intent:
     - provide one value,
@@ -2254,7 +2307,7 @@ Input: "tandem, two 60kN wheels, 300×300mm each, 1.2m spacing, interior"
     - ask a question / need clarification.
 2. Extract values and units if present.
 3. Map values to correct parameter keys.
-4. If uncertain, set needs_clarification=true.
+4. If uncertain or units are missing for dimensional parameters, set needs_clarification=true.
 5. Write friendly_response as a natural beginner-friendly assistant.
 
 ### OUTPUT FORMAT (JSON only, no other text):
@@ -2276,6 +2329,8 @@ IMPORTANT DETECTION RULES:
 - Detect load_location from: corner / edge / interior (or 1/2/3).
 - Never expose raw JSON, schema keys, or implementation details in friendly_response.
 - Be warm, concise, and proactive.
+- CRITICAL: If dimensional values (length, width, thickness) are given without units
+  and cannot be confidently determined, ask for the unit. Do NOT assume mm.
 
 JSON RESPONSE:"""
     return prompt
@@ -2309,6 +2364,104 @@ def _invoke_llm_with_timeout(llm: ChatOllama, messages: List, timeout_seconds: f
         raise TimeoutError(f"LLM request timed out after {timeout:.1f}s") from exc
     finally:
         executor.shutdown(wait=False, cancel_futures=True)
+
+
+def _detect_naive_input_ambiguities(
+    user_input: str,
+    extracted: Dict[str, Any],
+    current_asking: Optional[str],
+) -> Dict[str, str]:
+    """Detect when extracted values are likely wrong due to missing units.
+
+    Returns {param_key: human_readable_description} for each ambiguous parameter.
+    An empty dict means no ambiguities detected.
+
+    Rules:
+    - "NxM" or "N by M" without an immediately following unit → a and b are ambiguous
+      (threshold: values < 1000, since nobody writes "4x6" meaning 4mm×6mm)
+    - t < 100 without a clear unit in the text → ambiguous
+      (threshold: 100 because typical slab thickness is 150-300mm)
+    - a or b < 1000 without a clear unit in the text → ambiguous
+      (threshold: 1000 because nobody gives slab dimensions in sub-mm values)
+    """
+    ambiguous: Dict[str, str] = {}
+    lowered = user_input.lower()
+
+    _UNIT_PATTERN = r"(mm|cm|m\b|meter|meters|ft|feet|foot|inch|inches)"
+
+    def _has_unit_near_value(val: float) -> bool:
+        val_str = str(int(val)) if val == int(val) else str(val)
+        return bool(re.search(
+            rf"\b{re.escape(val_str)}\s*{_UNIT_PATTERN}",
+            lowered,
+        ))
+
+    # 1. "NxM" or "N by M" without trailing unit — most common naive pattern
+    nxm_match = re.search(
+        r"\b(\d+(?:\.\d+)?)\s*(?:x|×)\s*(\d+(?:\.\d+)?)\b",
+        lowered,
+    )
+    if nxm_match:
+        after = lowered[nxm_match.end() : nxm_match.end() + 15]
+        unit_follows = bool(re.match(r"\s*" + _UNIT_PATTERN, after))
+        n1, n2 = float(nxm_match.group(1)), float(nxm_match.group(2))
+        if not unit_follows and n1 < 1000 and n2 < 1000:
+            # Dimensions look like they could be m/ft/inch but no unit given
+            if not ("a" in extracted and float(extracted["a"]) >= 1000) and \
+               not ("b" in extracted and float(extracted["b"]) >= 1000):
+                msg = (
+                    f"'{n1} × {n2}' has no unit — could be {n1} m × {n2} m, "
+                    f"{n1} ft × {n2} ft, or {int(n1 * 1000)} mm × {int(n2 * 1000)} mm. "
+                    "What unit did you mean?"
+                )
+                ambiguous["a"] = msg
+                ambiguous["b"] = msg
+
+    # Also catch "N by M" written out
+    by_match = re.search(
+        r"\b(\d+(?:\.\d+)?)\s+by\s+(\d+(?:\.\d+)?)\b",
+        lowered,
+    )
+    if by_match and "a" not in ambiguous:
+        after = lowered[by_match.end() : by_match.end() + 15]
+        unit_follows = bool(re.match(r"\s*" + _UNIT_PATTERN, after))
+        n1, n2 = float(by_match.group(1)), float(by_match.group(2))
+        if not unit_follows and n1 < 1000 and n2 < 1000:
+            if not ("a" in extracted and float(extracted["a"]) >= 1000) and \
+               not ("b" in extracted and float(extracted["b"]) >= 1000):
+                msg = (
+                    f"'{n1} by {n2}' has no unit — could be meters, feet, or mm. "
+                    "Please specify."
+                )
+                ambiguous["a"] = msg
+                ambiguous["b"] = msg
+
+    # 2. Thickness without unit (small values are almost certainly not mm)
+    if "t" in extracted and "t" not in ambiguous:
+        t_val = float(extracted["t"])
+        if t_val < 100 and not _has_unit_near_value(t_val):
+            info = PARAM_INFO["t"]
+            ambiguous["t"] = (
+                f"Thickness '{t_val}' has no unit — "
+                f"did you mean {t_val} mm, {t_val} cm ({t_val * 10:.0f} mm), "
+                f"or {t_val} inches ({t_val * 25.4:.0f} mm)? "
+                f"Typical range: {info['typical_range']}."
+            )
+
+    # 3. Slab length/width without unit (values 1-999 are suspicious without units)
+    for dim_key in ("a", "b"):
+        if dim_key in extracted and dim_key not in ambiguous:
+            val = float(extracted[dim_key])
+            if val < 1000 and not _has_unit_near_value(val):
+                info = PARAM_INFO[dim_key]
+                ambiguous[dim_key] = (
+                    f"{info['name']} '{val}' has no unit — "
+                    f"did you mean {val} m ({int(val * 1000)} mm), "
+                    f"{val} ft ({val * 304.8:.0f} mm), or {val} mm? "
+                    f"Typical range: {info['typical_range']}."
+                )
+
+    return ambiguous
 
 
 def _detect_extraction_ambiguity(
@@ -2391,7 +2544,20 @@ def process_user_input_with_llm(
         extracted_multiple[key] = values
     extracted_units.update(engineering_units)
 
-    if extracted_multiple:
+    # --- Ambiguity detection pass ---
+    # Run before deciding whether to return deterministically or call the LLM.
+    naive_ambiguities = _detect_naive_input_ambiguities(user_input, extracted_multiple, current_asking)
+
+    # Split into confirmed (no ambiguity) and ambiguous (unit missing / unreliable).
+    confirmed_extracted: Dict[str, Any] = {
+        k: v for k, v in extracted_multiple.items() if k not in naive_ambiguities
+    }
+    ambiguous_extracted: Dict[str, Any] = {
+        k: v for k, v in extracted_multiple.items() if k in naive_ambiguities
+    }
+
+    # When there is no ambiguity, use the fully deterministic path (existing behaviour).
+    if extracted_multiple and not naive_ambiguities:
         # friendly_response is intentionally None here — generate_autonomous_assistant_message()
         # will narrate the captured values naturally instead of a hardcoded static string.
         friendly: Optional[str] = None
@@ -2485,25 +2651,78 @@ def process_user_input_with_llm(
             "conversation_only": False,
         }
 
-    # Deterministic guided fallback: if we're asking a specific field and the
-    # user provided a number, capture it without requiring an LLM call.
-    if current_asking:
+    # --- Ambiguous path: route to LLM ---
+    # When naive_ambiguities is non-empty the user gave information without clear units.
+    # We always call the LLM here so it can ask a single focused clarification question
+    # with full session awareness, rather than silently assuming a wrong unit.
+    #
+    # When there was nothing extracted at all and we're in guided mode, also try the
+    # cheap single-value heuristic first (but only when the value is unambiguous).
+    if not naive_ambiguities and current_asking:
         num, unit = _extract_first_number_with_unit(user_input)
         if isinstance(num, (int, float)):
-            return {
-                "understood_value": float(num),
-                "use_default": False,
-                "use_all_defaults": False,
-                "needs_clarification": False,
-                "friendly_response": "Thanks, I captured that value.",
-                "original_unit": unit,
-                "parameter_key": current_asking,
-                "extracted_multiple": {},
-            }
+            # Ambiguity check for the single value too
+            single_ambig: Dict[str, str] = {}
+            if current_asking in ("a", "b") and num < 1000:
+                lowered_chk = user_input.lower()
+                val_str = str(int(num)) if num == int(num) else str(num)
+                has_unit = bool(re.search(
+                    rf"\b{re.escape(val_str)}\s*(mm|cm|m\b|meter|meters|ft|feet|foot|inch|inches)",
+                    lowered_chk,
+                ))
+                if not has_unit:
+                    single_ambig[current_asking] = (
+                        f"Value {num} for {PARAM_INFO[current_asking]['name']} has no unit."
+                    )
+            elif current_asking == "t" and num < 100:
+                lowered_chk = user_input.lower()
+                val_str = str(int(num)) if num == int(num) else str(num)
+                has_unit = bool(re.search(
+                    rf"\b{re.escape(val_str)}\s*(mm|cm|m\b|meter|meters|ft|feet|foot|inch|inches)",
+                    lowered_chk,
+                ))
+                if not has_unit:
+                    single_ambig[current_asking] = (
+                        f"Thickness {num} has no unit."
+                    )
+            if not single_ambig:
+                return {
+                    "understood_value": float(num),
+                    "use_default": False,
+                    "use_all_defaults": False,
+                    "needs_clarification": False,
+                    "friendly_response": "Thanks, I captured that value.",
+                    "original_unit": unit,
+                    "parameter_key": current_asking,
+                    "extracted_multiple": {},
+                }
+            # Single value is ambiguous → merge and fall through to LLM
+            naive_ambiguities.update(single_ambig)
+            confirmed_extracted = {}
+
+    def _with_confirmed(d: Dict[str, Any]) -> Dict[str, Any]:
+        """Merge confirmed (unambiguous) extracted values into any result dict.
+
+        This ensures that when the LLM is called due to ambiguity but then fails
+        (timeout, unavailable), the clearly-extracted values (e.g., K=50, mesh=coarse)
+        from the same user message are not silently discarded.
+        """
+        if confirmed_extracted:
+            em = d.setdefault("extracted_multiple", {})
+            for ck, cv in confirmed_extracted.items():
+                if ck not in em:
+                    em[ck] = cv
+        return d
 
     try:
         system_message = SystemMessage(content=create_conversational_system_prompt())
-        extraction_prompt = create_extraction_prompt(user_input, context, current_asking)
+        extraction_prompt = create_extraction_prompt(
+            user_input,
+            context,
+            current_asking,
+            ambiguity_context=naive_ambiguities if naive_ambiguities else None,
+            confirmed_extracted=confirmed_extracted if naive_ambiguities else None,
+        )
         human_message = HumanMessage(content=extraction_prompt)
 
         response = _invoke_llm_with_timeout(llm, [system_message, human_message])
@@ -2536,6 +2755,14 @@ def process_user_input_with_llm(
                 result.setdefault("parameter_key", current_asking)
                 result.setdefault("extracted_multiple", {})
 
+                # Merge in confirmed_extracted so unambiguous values from this turn
+                # are preserved even if the LLM only focused on the clarification.
+                # Don't overwrite what the LLM explicitly extracted.
+                if confirmed_extracted:
+                    for ck, cv in confirmed_extracted.items():
+                        if ck not in result["extracted_multiple"]:
+                            result["extracted_multiple"][ck] = cv
+
                 return result
             except json.JSONDecodeError:
                 if current_asking:
@@ -2554,59 +2781,59 @@ def process_user_input_with_llm(
                             "parameter_key": current_asking,
                             "extracted_multiple": {},
                         }
-                return {
+                return _with_confirmed({
                     "understood_value": None,
                     "use_default": False,
                     "use_all_defaults": False,
                     "needs_clarification": True,
-                    "friendly_response": "I'm not quite sure I understood that. Could you try again? You can enter a number, or say 'default' to use the suggested value. 😊",
-                }
+                    "friendly_response": "I’m not quite sure I understood that. Could you try again? You can enter a number, or say ‘default’ to use the suggested value. 😊",
+                })
 
-        return {"needs_clarification": True, "friendly_response": "I didn't catch that. Could you please try again?"}
+        return _with_confirmed({"needs_clarification": True, "friendly_response": "I didn’t catch that. Could you please try again?"})
 
     except TimeoutError:
-        return {
+        return _with_confirmed({
             "needs_clarification": True,
             "friendly_response": "I’m having trouble reaching the model right now. If you share the key numbers (slab size, thickness, concrete grade, K value, wheel load/contact area), I can still capture them — or you can say ‘let’s begin’ for guided setup.",
-        }
+        })
     except Exception as exc:
         err_text = str(exc).strip()
         lowered_err = err_text.lower()
 
         if "model" in lowered_err and "not found" in lowered_err:
-            return {
+            return _with_confirmed({
                 "needs_clarification": True,
                 "friendly_response": (
-                    "I couldn't use the selected Ollama model because it is not installed. "
-                    "Please choose an available model in settings, or try again and I'll continue with a fallback model if available."
+                    "I couldn’t use the selected Ollama model because it is not installed. "
+                    "Please choose an available model in settings, or try again and I’ll continue with a fallback model if available."
                 ),
-            }
+            })
 
         if "unauthorized" in lowered_err or "status code: 401" in lowered_err:
-            return {
+            return _with_confirmed({
                 "needs_clarification": True,
                 "friendly_response": (
                     "Your Ollama model request is unauthorized (401). "
                     "This usually means the selected cloud model needs authentication. "
                     "Please switch to a locally available model in settings or configure Ollama cloud auth, then try again."
                 ),
-            }
+            })
 
         if "cannot reach ollama" in lowered_err or "connection" in lowered_err:
-            return {
+            return _with_confirmed({
                 "needs_clarification": True,
                 "friendly_response": (
-                    "I couldn't reach your Ollama server. Please ensure Ollama is running and the URL is correct, then try again."
+                    "I couldn’t reach your Ollama server. Please ensure Ollama is running and the URL is correct, then try again."
                 ),
-            }
+            })
 
-        return {
+        return _with_confirmed({
             "needs_clarification": True,
             "friendly_response": (
                 "I hit an internal processing issue while understanding that message. "
                 "Please try again in one sentence with key values (for example: length 5m, width 5m, thickness 200mm)."
             ),
-        }
+        })
 
 
 def generate_welcome_message() -> str:

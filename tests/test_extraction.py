@@ -144,6 +144,7 @@ class TestProcessUserInputWithLLM:
         mock_llm = self._make_llm_mock("Sorry, I cannot help with that.")
         result = process_user_input_with_llm("test input", mock_llm, "", {}, None)
         assert result["needs_clarification"] is True
+        assert mock_llm.invoke.call_count == 2  # initial attempt + one retry
 
     def test_markdown_fenced_json_is_parsed(self):
         payload = {
